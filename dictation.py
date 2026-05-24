@@ -339,6 +339,18 @@ def extract_words_from_pdf(pdf_path):
     return unique_words
 
 
+def get_pdf_files_from_dir(directory):
+    """Scans directory and returns all files ending in .pdf or .PDF."""
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        return []
+    files = []
+    for f in os.listdir(directory):
+        if f.lower().endswith(".pdf"):
+            files.append(f)
+    return sorted(files)
+
+
 def download_openai_tts(text, voice, filepath):
     """Downloads TTS audio file from OpenAI API and saves to disk."""
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -606,6 +618,9 @@ def interactive_config_menu():
         border_style="cyan"
     ))
     
+    # Auto-create input_pdf folder if missing
+    os.makedirs("input_pdf", exist_ok=True)
+    
     # Check if a previous test state is cached
     previous_test = load_previous_test()
     has_prev = previous_test is not None
@@ -618,12 +633,12 @@ def interactive_config_menu():
         console.print("  [2] Read local [bold green]input.txt[/bold green] (Default)")
         console.print("  [3] Generate dynamically using [bold green]Gemini AI[/bold green]")
         console.print("  [4] Generate dynamically using [bold green]OpenAI AI[/bold green]")
-        console.print("  [5] Generate dynamically from a [bold green]PDF file[/bold green] (Vocabulary Source)")
+        console.print("  [5] Generate dynamically from a [bold green]PDF file[/bold green] inside 'input_pdf/'")
     else:
         console.print("  [1] Read local [bold green]input.txt[/bold green] (Default)")
         console.print("  [2] Generate dynamically using [bold green]Gemini AI[/bold green]")
         console.print("  [3] Generate dynamically using [bold green]OpenAI AI[/bold green]")
-        console.print("  [4] Generate dynamically from a [bold green]PDF file[/bold green] (Vocabulary Source)")
+        console.print("  [4] Generate dynamically from a [bold green]PDF file[/bold green] inside 'input_pdf/'")
         
     choice_src = input(f"Enter selection [default {'2' if has_prev else '1'}]: ").strip()
     if not choice_src:
@@ -683,17 +698,66 @@ def interactive_config_menu():
             original_text = f.read().strip()
     elif source == 4:
         # PDF Vocabulary Source
-        pdf_path = input("Enter PDF file path: ").strip()
+        pdf_files = get_pdf_files_from_dir("input_pdf")
+        if not pdf_files:
+            console.print("[bold red]Error: No PDF files found in the 'input_pdf/' directory.[/bold red]")
+            console.print("[yellow]Please copy your PDF files into the 'input_pdf/' folder and press Enter to retry...[/yellow]")
+            input()
+            return interactive_config_menu()
+            
+        selected_pdf = None
+        if len(pdf_files) == 1:
+            selected_pdf = pdf_files[0]
+            console.print(f"[green]Found exactly one PDF: '{selected_pdf}'. Selecting it automatically...[/green]")
+        else:
+            console.print("\n[bold white]Select PDF File from 'input_pdf/':[/bold white]")
+            for idx, f in enumerate(pdf_files):
+                console.print(f"  [{idx+1}] {f}")
+            while True:
+                try:
+                    pdf_choice = input(f"Enter choice [1-{len(pdf_files)}]: ").strip()
+                    choice_idx = int(pdf_choice) - 1
+                    if 0 <= choice_idx < len(pdf_files):
+                        selected_pdf = pdf_files[choice_idx]
+                        break
+                    console.print(f"[red]Please enter a choice between 1 and {len(pdf_files)}.[/red]")
+                except ValueError:
+                    console.print("[red]Invalid input. Please enter a valid number.[/red]")
+                    
+        pdf_path = os.path.join("input_pdf", selected_pdf)
+        
         try:
             words = extract_words_from_pdf(pdf_path)
-            # Sample 40 words, or all if fewer
-            sample_size = min(40, len(words))
-            vocab_words = random.sample(words, sample_size)
-            topic = f"PDF vocabulary: {os.path.basename(pdf_path)}"
-            console.print(f"[green]Successfully extracted {len(words)} unique words. Sampled {sample_size} for dictation vocabulary.[/green]")
+            console.print(f"[green]Successfully extracted {len(words)} unique words from '{selected_pdf}'.[/green]")
+            console.print("\n[bold white]Choose vocabulary range to send to AI:[/bold white]")
+            console.print("  [1] Sample up to 40 random words (Default)")
+            console.print("  [2] Use ALL unique words from the PDF")
+            vocab_choice = input("Enter selection [1-2, default 1]: ").strip()
+            
+            if vocab_choice == '2':
+                if len(words) > 1000:
+                    console.print(f"[yellow]Warning: Using all {len(words)} words might exceed LLM prompt token limits or yield lower quality coherent text.[/yellow]")
+                    confirm_all = input("Are you sure you want to use all words? (y/n) [y]: ").strip().lower()
+                    if confirm_all == 'n':
+                        sample_size = min(40, len(words))
+                        vocab_words = random.sample(words, sample_size)
+                        console.print(f"[green]Sampled {sample_size} random words instead.[/green]")
+                    else:
+                        vocab_words = words
+                        console.print(f"[green]Using all {len(vocab_words)} words as vocabulary.[/green]")
+                else:
+                    vocab_words = words
+                    console.print(f"[green]Using all {len(vocab_words)} words as vocabulary.[/green]")
+            else:
+                sample_size = min(40, len(words))
+                vocab_words = random.sample(words, sample_size)
+                console.print(f"[green]Sampled {sample_size} random words for vocabulary.[/green]")
+                
+            topic = f"PDF vocabulary: {selected_pdf}"
         except Exception as e:
             console.print(f"[bold red]Error parsing PDF: {e}[/bold red]")
             console.print("[yellow]Falling back to default input.txt text.[/yellow]")
+            time.sleep(3)
             return interactive_config_menu()
             
         # Select AI Provider to write using these words
@@ -827,6 +891,7 @@ def main():
     parser.add_argument("--generate-difficulty", "-d", type=str, choices=["easy", "medium", "hard"], default=None,
                         help="Auto-generate AI text with chosen difficulty (skips interactive config, uses Gemini by default)")
     parser.add_argument("--pdf", type=str, default=None, help="PDF file path to extract vocabulary from (skips interactive menu)")
+    parser.add_argument("--pdf-all", action="store_true", help="Use all unique words from the PDF (works with --pdf)")
     args = parser.parse_args()
 
     original_text = ""
@@ -842,6 +907,9 @@ def main():
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     
+    # Auto-create input_pdf folder
+    os.makedirs("input_pdf", exist_ok=True)
+    
     # Decide text source: CLI overrides or interactive menu
     if args.input:
         if not os.path.exists(args.input):
@@ -854,8 +922,13 @@ def main():
         # Direct CLI PDF generation
         try:
             words = extract_words_from_pdf(args.pdf)
-            sample_size = min(40, len(words))
-            vocab_words = random.sample(words, sample_size)
+            if args.pdf_all:
+                vocab_words = words
+                console.print(f"[green]Using all {len(vocab_words)} words as vocabulary from PDF.[/green]")
+            else:
+                sample_size = min(40, len(words))
+                vocab_words = random.sample(words, sample_size)
+                console.print(f"[green]Sampled {sample_size} random words from PDF vocabulary.[/green]")
             topic = f"PDF vocabulary: {os.path.basename(args.pdf)}"
             provider = 3 if os.environ.get("OPENAI_API_KEY") else 2
             original_text, _ = get_ai_text(provider, "medium", vocab_words)

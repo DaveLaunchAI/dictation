@@ -48,3 +48,8 @@ Icon
 # Dictation State Cache
 previous_test.json
 .temp_audio_cache/
+
+# User PDFs
+input_pdf/*
+!input_pdf/.gitkeep
+
