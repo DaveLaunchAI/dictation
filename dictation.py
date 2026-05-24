@@ -216,7 +216,7 @@ def load_previous_test():
     return None
 
 
-def generate_gemini(difficulty, topic=None):
+def generate_gemini(difficulty, topic=None, vocab_words=None):
     """Generates spelling dictation text using Gemini API REST endpoint."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -225,8 +225,12 @@ def generate_gemini(difficulty, topic=None):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
     topic_str = f" The theme of the passage should be loosely related to: {topic}." if topic else ""
+    vocab_str = ""
+    if vocab_words:
+        vocab_str = f" The passage must be constructed using as many of the following vocabulary words as possible: {', '.join(vocab_words)}."
+        
     prompt = (
-        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str} "
+        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str}{vocab_str} "
         f"The difficulty level is {difficulty}. "
         f"For Easy: Use common vocabulary, simple spelling words. "
         f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
@@ -252,7 +256,7 @@ def generate_gemini(difficulty, topic=None):
         return text
 
 
-def generate_openai(difficulty, topic=None):
+def generate_openai(difficulty, topic=None, vocab_words=None):
     """Generates spelling dictation text using OpenAI API REST endpoint."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -261,8 +265,12 @@ def generate_openai(difficulty, topic=None):
     url = "https://api.openai.com/v1/chat/completions"
     
     topic_str = f" The theme of the passage should be loosely related to: {topic}." if topic else ""
+    vocab_str = ""
+    if vocab_words:
+        vocab_str = f" The passage must be constructed using as many of the following vocabulary words as possible: {', '.join(vocab_words)}."
+        
     prompt = (
-        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str} "
+        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str}{vocab_str} "
         f"The difficulty level is {difficulty}. "
         f"For Easy: Use common vocabulary, simple spelling words. "
         f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
@@ -288,22 +296,47 @@ def generate_openai(difficulty, topic=None):
         return text
 
 
-def get_ai_text(provider, difficulty):
+def get_ai_text(provider, difficulty, vocab_words=None):
     """Fetches AI generated spelling text, falling back gracefully to local text if APIs fail."""
     prov_name = "Gemini" if provider == 2 else "OpenAI"
     diff_name = difficulty.lower()
-    topic = random.choice(TOPICS)
-    console.print(f"[cyan]Connecting to {prov_name} API to generate {diff_name} spelling text themed around '{topic}'...[/cyan]")
+    topic = random.choice(TOPICS) if not vocab_words else "vocabulary from PDF"
+    console.print(f"[cyan]Connecting to {prov_name} API to generate {diff_name} spelling text...[/cyan]")
     
     try:
         if provider == 2:
-            return generate_gemini(diff_name, topic), topic
+            return generate_gemini(diff_name, topic, vocab_words), topic
         else:
-            return generate_openai(diff_name, topic), topic
+            return generate_openai(diff_name, topic, vocab_words), topic
     except Exception as e:
         console.print(f"[bold yellow]Warning: Failed to fetch text from {prov_name} ({e}).[/bold yellow]")
         console.print("[yellow]Falling back to curated offline dictionary.[/yellow]")
         return random.choice(FALLBACK_TEXTS[diff_name]), f"offline {diff_name} fallback"
+
+
+def extract_words_from_pdf(pdf_path):
+    """Extracts unique lowercase alphabetic words of length 3-15 from a PDF file."""
+    try:
+        import pypdf
+    except ImportError:
+        raise ImportError("The 'pypdf' library is required to extract text from PDFs. Please install it with: pip install pypdf")
+        
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF file '{pdf_path}' not found.")
+        
+    reader = pypdf.PdfReader(pdf_path)
+    words = []
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            # Match alphabetic words of length 3 to 15
+            page_words = re.findall(r'\b[a-zA-Z]{3,15}\b', text)
+            words.extend(page_words)
+            
+    unique_words = sorted(list(set(w.lower() for w in words)))
+    if not unique_words:
+        raise ValueError(f"No valid English words found in PDF '{pdf_path}'.")
+    return unique_words
 
 
 def download_openai_tts(text, voice, filepath):
@@ -341,10 +374,15 @@ def pre_download_chunks(chunks, voice, temp_dir):
     
     for idx, chunk in enumerate(chunks):
         filepath = os.path.join(temp_dir, f"chunk_{idx}.mp3")
+        
+        # Prepend comma and space to create a short pause before speaking the first word.
+        # This protects against audio clipping when spawning subprocesses on macOS.
+        padded_chunk = ", " + chunk
+        
         retries = 3
         while retries > 0:
             try:
-                download_openai_tts(chunk, voice, filepath)
+                download_openai_tts(padded_chunk, voice, filepath)
                 break
             except Exception as e:
                 retries -= 1
@@ -395,7 +433,7 @@ def get_chunk_delay(chunk, target_speed, speak_speed, custom_pause=None):
     return max(0.0, target_duration - speak_duration)
 
 
-def draw_screen(typed_text, paused, target_speed, start_word, total_words, voice_name, is_audio_finished, delay_remaining):
+def draw_screen(typed_text, cursor_pos, paused, target_speed, start_word, total_words, voice_name, is_audio_finished, delay_remaining):
     """Redraws the full-screen terminal interface in-place to prevent flickering."""
     # Move cursor to top-left of the viewport
     sys.stdout.write("\033[H")
@@ -448,9 +486,33 @@ def draw_screen(typed_text, paused, target_speed, start_word, total_words, voice
     console.print(header_panel)
     console.print("\n[bold white]Type what you hear below (suggestions, auto-correct, case & punctuation ignored):[/bold white]\n")
     
-    # Render typed text with cursor block. Replace newlines with \r\n for TTY raw mode compatibility
-    display_text = (typed_text + "█").replace("\n", "\r\n")
-    console.print(display_text, end="")
+    # Format typed text with visual cursor.
+    # If the cursor is at the end, append block █. Otherwise, reverse-video style the character under the cursor.
+    if cursor_pos >= len(typed_text):
+        display_text = typed_text + "█"
+    else:
+        display_text = typed_text[:cursor_pos] + f"[reverse]{typed_text[cursor_pos]}[/reverse]" + typed_text[cursor_pos+1:]
+        
+    # Get terminal size to perform auto-scaling and avoid scrolling viewport drift
+    try:
+        cols, rows = os.get_terminal_size()
+    except Exception:
+        cols, rows = 80, 24
+        
+    # Header panel is about 7 lines, instruction 3, newlines/margins 4 -> leave remaining rows
+    max_type_lines = max(5, rows - 14)
+    
+    lines = display_text.split("\n")
+    if len(lines) > max_type_lines:
+        display_lines = ["... (scrolled up)"] + lines[-max_type_lines:]
+    else:
+        display_lines = lines
+        
+    display_text_scaled = "\n".join(display_lines)
+    
+    # Render typed text replacing newlines with \r\n for raw mode TTY compatibility
+    display_text_print = display_text_scaled.replace("\n", "\r\n")
+    console.print(display_text_print, end="")
     
     # Clear anything remaining below the cursor
     sys.stdout.write("\033[J")
@@ -556,10 +618,12 @@ def interactive_config_menu():
         console.print("  [2] Read local [bold green]input.txt[/bold green] (Default)")
         console.print("  [3] Generate dynamically using [bold green]Gemini AI[/bold green]")
         console.print("  [4] Generate dynamically using [bold green]OpenAI AI[/bold green]")
+        console.print("  [5] Generate dynamically from a [bold green]PDF file[/bold green] (Vocabulary Source)")
     else:
         console.print("  [1] Read local [bold green]input.txt[/bold green] (Default)")
         console.print("  [2] Generate dynamically using [bold green]Gemini AI[/bold green]")
         console.print("  [3] Generate dynamically using [bold green]OpenAI AI[/bold green]")
+        console.print("  [4] Generate dynamically from a [bold green]PDF file[/bold green] (Vocabulary Source)")
         
     choice_src = input(f"Enter selection [default {'2' if has_prev else '1'}]: ").strip()
     if not choice_src:
@@ -585,6 +649,8 @@ def interactive_config_menu():
             source = 2  # Gemini
         elif choice_src == '4':
             source = 3  # OpenAI
+        elif choice_src == '5':
+            source = 4  # PDF
     else:
         if choice_src == '1':
             source = 1  # input.txt
@@ -592,9 +658,12 @@ def interactive_config_menu():
             source = 2  # Gemini
         elif choice_src == '3':
             source = 3  # OpenAI
+        elif choice_src == '4':
+            source = 4  # PDF
             
     original_text = ""
     topic = "local input.txt"
+    vocab_words = None
     
     if source == 1:
         # Load local input.txt
@@ -612,6 +681,41 @@ def interactive_config_menu():
                 f.write(default_content)
         with open("input.txt", "r", encoding="utf-8") as f:
             original_text = f.read().strip()
+    elif source == 4:
+        # PDF Vocabulary Source
+        pdf_path = input("Enter PDF file path: ").strip()
+        try:
+            words = extract_words_from_pdf(pdf_path)
+            # Sample 40 words, or all if fewer
+            sample_size = min(40, len(words))
+            vocab_words = random.sample(words, sample_size)
+            topic = f"PDF vocabulary: {os.path.basename(pdf_path)}"
+            console.print(f"[green]Successfully extracted {len(words)} unique words. Sampled {sample_size} for dictation vocabulary.[/green]")
+        except Exception as e:
+            console.print(f"[bold red]Error parsing PDF: {e}[/bold red]")
+            console.print("[yellow]Falling back to default input.txt text.[/yellow]")
+            return interactive_config_menu()
+            
+        # Select AI Provider to write using these words
+        console.print("\n[bold white]Select AI Provider to generate passage using PDF words:[/bold white]")
+        console.print("  [1] Gemini AI (Default)")
+        console.print("  [2] OpenAI AI")
+        prov_choice = input("Enter selection [1-2, default 1]: ").strip()
+        ai_prov = 3 if prov_choice == '2' else 2
+        
+        # Difficulty
+        console.print("\n[bold white]Select Difficulty Level:[/bold white]")
+        console.print("  [1] Easy")
+        console.print("  [2] Medium (Default)")
+        console.print("  [3] Hard")
+        diff_choice = input("Enter selection [1-3, default 2]: ").strip()
+        difficulty = "Medium"
+        if diff_choice == '1':
+            difficulty = "Easy"
+        elif diff_choice == '3':
+            difficulty = "Hard"
+            
+        original_text, _ = get_ai_text(ai_prov, difficulty, vocab_words)
     else:
         # Ask for difficulty
         console.print("\n[bold white]2. Select AI Difficulty Level:[/bold white]")
@@ -722,6 +826,7 @@ def main():
     parser.add_argument("--input", "-i", type=str, default=None, help="Input text file path (skips interactive config)")
     parser.add_argument("--generate-difficulty", "-d", type=str, choices=["easy", "medium", "hard"], default=None,
                         help="Auto-generate AI text with chosen difficulty (skips interactive config, uses Gemini by default)")
+    parser.add_argument("--pdf", type=str, default=None, help="PDF file path to extract vocabulary from (skips interactive menu)")
     args = parser.parse_args()
 
     original_text = ""
@@ -745,6 +850,18 @@ def main():
         with open(args.input, "r", encoding="utf-8") as f:
             original_text = f.read().strip()
         topic = "CLI input file"
+    elif args.pdf:
+        # Direct CLI PDF generation
+        try:
+            words = extract_words_from_pdf(args.pdf)
+            sample_size = min(40, len(words))
+            vocab_words = random.sample(words, sample_size)
+            topic = f"PDF vocabulary: {os.path.basename(args.pdf)}"
+            provider = 3 if os.environ.get("OPENAI_API_KEY") else 2
+            original_text, _ = get_ai_text(provider, "medium", vocab_words)
+        except Exception as e:
+            console.print(f"[bold red]Error: {e}[/bold red]")
+            sys.exit(1)
     elif args.generate_difficulty:
         # CLI direct generation (default Gemini if both key found, otherwise checks environment)
         provider = 2 # Gemini
@@ -818,6 +935,7 @@ def main():
     audio = AudioController(voice=voice, premium_mode=premium_mode)
     
     typed_text = ""
+    cursor_pos = 0
     paused = False
     chunk_idx = 0
     delay_remaining = 0.0
@@ -850,7 +968,7 @@ def main():
                                 delay_remaining = max(0.0, delay_remaining - elapsed_time)
                             else:
                                 if premium_mode:
-                                    # Play cached MP3 chunk using afplay
+                                    # Play cached MP3 chunk using afplay (silent prepended comma is already compiled in the MP3)
                                     filepath = os.path.join(temp_dir, f"chunk_{chunk_idx}.mp3")
                                     speak_speed_to_use = max(150, speed) if speed < 150 else speed
                                     if speed < 150 and args.speak_speed:
@@ -866,13 +984,17 @@ def main():
                                         speak_speed_to_use = speak_speed
                                     
                                     delay_remaining = get_chunk_delay(chunks[chunk_idx], speed, speak_speed_to_use, custom_pause)
-                                    audio.play(chunks[chunk_idx], speak_speed_to_use)
+                                    # Prepend a comma to introduce a brief pause to prevent start-of-chunk enunciation clipping
+                                    audio.play(", " + chunks[chunk_idx], speak_speed_to_use)
                                 
                                 chunk_idx += 1
                                 last_redraw_time = 0 # Force immediate redraw
                                 
                 # Periodic or event-driven screen redraw
                 if now - last_redraw_time > 0.1:
+                    # Keep cursor within bounds
+                    cursor_pos = min(len(typed_text), max(0, cursor_pos))
+                    
                     # Calculate active word count for progress
                     active_idx = max(0, chunk_idx - 1)
                     if chunk_idx == 0:
@@ -881,7 +1003,7 @@ def main():
                         start_word = sum(len(c.split()) for c in chunks[:active_idx]) + 1
                     start_word = min(start_word, total_words)
                     
-                    draw_screen(typed_text, paused, speed, start_word, total_words, voice_name, audio.is_finished(), delay_remaining)
+                    draw_screen(typed_text, cursor_pos, paused, speed, start_word, total_words, voice_name, audio.is_finished(), delay_remaining)
                     last_redraw_time = now
                     
                 # Read keyboard input without blocking
@@ -924,6 +1046,7 @@ def main():
                     elif char == '4':  # 4 -> Restart dictation
                         audio.stop()
                         typed_text = ""
+                        cursor_pos = 0
                         paused = False
                         chunk_idx = 0
                         delay_remaining = 0.0
@@ -982,24 +1105,42 @@ def main():
                             last_loop_time = time.time()  # Reset loop time to prevent pacing jumps
                         
                     elif char == '\x1b':  # Escape sequence (e.g. arrow keys)
-                        # Consume extra characters of arrow key sequence to prevent garbage characters
                         r2, _, _ = select.select([sys.stdin], [], [], 0.02)
                         if r2:
-                            sys.stdin.read(2)
+                            seq = sys.stdin.read(2)
+                            if seq == '[D':  # Left Arrow -> move cursor left
+                                cursor_pos = max(0, cursor_pos - 1)
+                                last_redraw_time = 0
+                            elif seq == '[C':  # Right Arrow -> move cursor right
+                                cursor_pos = min(len(typed_text), cursor_pos + 1)
+                                last_redraw_time = 0
+                            elif seq == '[3':  # Delete key sequence (\x1b[3~)
+                                r3, _, _ = select.select([sys.stdin], [], [], 0.02)
+                                if r3:
+                                    sys.stdin.read(1)  # Consume '~'
+                                    if cursor_pos < len(typed_text):
+                                        typed_text = typed_text[:cursor_pos] + typed_text[cursor_pos+1:]
+                                        last_redraw_time = 0
                             
                     elif char in ('\x7f', '\x08'):  # Backspace
-                        if len(typed_text) > 0:
-                            typed_text = typed_text[:-1]
+                        # Delete character before the cursor
+                        if cursor_pos > 0:
+                            typed_text = typed_text[:cursor_pos-1] + typed_text[cursor_pos:]
+                            cursor_pos -= 1
                         last_redraw_time = 0
                         
                     elif char in ('\r', '\n'):  # Enter
-                        typed_text += "\n"
+                        # Insert newline at cursor
+                        typed_text = typed_text[:cursor_pos] + "\n" + typed_text[cursor_pos:]
+                        cursor_pos += 1
                         last_redraw_time = 0
                         
                     elif ord(char) >= 32 and ord(char) < 127:  # Printable character
                         # Avoid allowing 1-7 keys to leak through to typed text if pressed in normal typing
                         if char not in ('1', '2', '3', '4', '5', '6', '7'):
-                            typed_text += char
+                            # Insert character at the cursor position
+                            typed_text = typed_text[:cursor_pos] + char + typed_text[cursor_pos:]
+                            cursor_pos += 1
                         last_redraw_time = 0
                         
     finally:
