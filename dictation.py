@@ -13,6 +13,7 @@ import argparse
 import urllib.request
 import json
 import random
+import shutil
 
 # Try to import rich packages, otherwise output standard error
 try:
@@ -117,22 +118,32 @@ class RawTerminal:
 
 
 class AudioController:
-    """Manages the background macOS 'say' subprocess for Text-to-Speech."""
-    def __init__(self, voice=None):
+    """Manages playback using either macOS 'afplay' (for premium MP3 chunks)
+    or macOS 'say' (for standard TTS text)."""
+    def __init__(self, voice=None, premium_mode=False):
         self.voice = voice
+        self.premium_mode = premium_mode
         self.proc = None
         self.is_paused = False
 
-    def play(self, text, rate):
+    def play(self, content, rate):
+        """
+        If premium_mode, content is the absolute filepath to the chunk MP3.
+        If standard mode, content is the string text to speak.
+        """
         self.stop()
         self.is_paused = False
         
-        cmd = ['say']
-        if self.voice:
-            cmd.extend(['-v', self.voice])
-        cmd.extend(['-r', str(rate), text])
-        
-        # Redirect stdout/stderr to devnull to avoid garbling terminal UI
+        if self.premium_mode:
+            # afplay -q 1 (high quality rate scaling) -r <rate> <file>
+            cmd = ['afplay', '-q', '1', '-r', str(rate), content]
+        else:
+            # say -v <voice> -r <wpm> <text>
+            cmd = ['say']
+            if self.voice:
+                cmd.extend(['-v', self.voice])
+            cmd.extend(['-r', str(rate), content])
+            
         self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def pause(self):
@@ -264,6 +275,63 @@ def get_ai_text(provider, difficulty):
         console.print(f"[bold yellow]Warning: Failed to fetch text from {prov_name} ({e}).[/bold yellow]")
         console.print("[yellow]Falling back to curated offline dictionary.[/yellow]")
         return random.choice(FALLBACK_TEXTS[diff_name])
+
+
+def download_openai_tts(text, voice, filepath):
+    """Downloads TTS audio file from OpenAI API and saves to disk."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable not found.")
+        
+    url = "https://api.openai.com/v1/audio/speech"
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}'
+    }
+    data = {
+        "model": "tts-1",
+        "input": text,
+        "voice": voice
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers, method='POST')
+    
+    with urllib.request.urlopen(req, timeout=15) as response:
+        with open(filepath, "wb") as f:
+            f.write(response.read())
+
+
+def pre_download_chunks(chunks, voice, temp_dir):
+    """Pre-downloads all chunks sequentially and caches them."""
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
+    
+    num_chunks = len(chunks)
+    console.print(f"[cyan]Downloading premium human-like speech files ({voice} voice)...[/cyan]")
+    
+    for idx, chunk in enumerate(chunks):
+        filepath = os.path.join(temp_dir, f"chunk_{idx}.mp3")
+        retries = 3
+        while retries > 0:
+            try:
+                download_openai_tts(chunk, voice, filepath)
+                break
+            except Exception as e:
+                retries -= 1
+                if retries == 0:
+                    raise e
+                time.sleep(1)
+        console.print(f"  [green]✓[/green] Downloaded chunk {idx+1}/{num_chunks} ({len(chunk.split())} words)")
+
+
+def cleanup_audio_files(temp_dir):
+    """Deletes cached speech chunks and temp folder."""
+    if os.path.exists(temp_dir):
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
 
 
 def chunk_text(text, chunk_size):
@@ -492,8 +560,38 @@ def interactive_config_menu():
             
         original_text = get_ai_text(source, difficulty)
 
-    # 3. Speed & Pacing Config
-    console.print("\n[bold white]3. Configure Playback Speed:[/bold white]")
+    # 3. Voice Quality selection
+    premium_mode = False
+    premium_voice = "alloy"
+    
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        console.print("\n[bold white]3. Select Voice Quality:[/bold white]")
+        console.print("  [1] Premium (OpenAI Human-like TTS - online) (Default)")
+        console.print("  [2] Standard (macOS say - offline)")
+        
+        choice_quality = input("Enter selection [1-2, default 1]: ").strip()
+        if choice_quality != '2':
+            premium_mode = True
+            
+            # Select Premium Voice
+            console.print("\n[bold white]4. Select Premium Voice Model:[/bold white]")
+            console.print("  [1] Alloy (neutral) (Default)")
+            console.print("  [2] Echo (warm male)")
+            console.print("  [3] Fable (dramatic)")
+            console.print("  [4] Onyx (deep male)")
+            console.print("  [5] Nova (expressive female)")
+            console.print("  [6] Shimmer (professional female)")
+            
+            choice_voice = input("Enter selection [1-6, default 1]: ").strip()
+            voices = {
+                '1': 'alloy', '2': 'echo', '3': 'fable',
+                '4': 'onyx', '5': 'nova', '6': 'shimmer'
+            }
+            premium_voice = voices.get(choice_voice, 'alloy')
+
+    # 5. Playback Speed Config
+    console.print("\n[bold white]5. Configure Playback Speed:[/bold white]")
     while True:
         try:
             speed_input = input("Enter target WPM speed (10-350) [default 175]: ").strip()
@@ -540,12 +638,15 @@ def interactive_config_menu():
             except ValueError:
                 console.print("[red]Invalid input. Please enter 'auto' or a valid decimal number.[/red]")
 
-    return original_text, target_speed, speak_speed, custom_pause
+    return original_text, target_speed, speak_speed, custom_pause, premium_mode, premium_voice
 
 
 def main():
     parser = argparse.ArgumentParser(description="Terminal-based Spelling Dictation App")
     parser.add_argument("--voice", "-v", type=str, default=None, help="TTS Voice Name (e.g., Samantha, Daniel)")
+    parser.add_argument("--premium", action="store_true", help="Use OpenAI premium human-like TTS (requires OPENAI_API_KEY)")
+    parser.add_argument("--premium-voice", type=str, default="alloy", choices=["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                        help="OpenAI premium voice model (default: alloy)")
     parser.add_argument("--speed", "-s", type=int, default=175, help="Initial speech speed in WPM (default: 175)")
     parser.add_argument("--speak-speed", type=int, default=None, help="TTS speaking rate for low-WPM chunk pacing (>= 150)")
     parser.add_argument("--custom-pause", type=float, default=None, help="Force custom pause between chunks in seconds")
@@ -559,6 +660,8 @@ def main():
     speed = args.speed
     speak_speed = args.speak_speed if args.speak_speed else max(150, speed)
     custom_pause = args.custom_pause
+    premium_mode = args.premium
+    premium_voice = args.premium_voice
     
     # Store standard terminal TTY settings for switching inside main loop
     fd = sys.stdin.fileno()
@@ -579,13 +682,20 @@ def main():
         original_text = get_ai_text(provider, args.generate_difficulty)
     else:
         # Interactive configuration
-        original_text, speed, speak_speed, custom_pause = interactive_config_menu()
+        original_text, speed, speak_speed, custom_pause, p_mode, p_voice = interactive_config_menu()
+        premium_mode = p_mode
+        premium_voice = p_voice
         
     if not original_text:
         console.print("[bold red]Error: No dictation text loaded.[/bold red]")
         sys.exit(1)
         
-    # Get available voices and select a default if none specified
+    # Check if premium mode is enabled but key is missing
+    if premium_mode and not os.environ.get("OPENAI_API_KEY"):
+        console.print("[yellow]Warning: OPENAI_API_KEY not found in environment. Falling back to offline macOS say.[/yellow]")
+        premium_mode = False
+        
+    # Get available voices and select a default if none specified (for standard mode)
     available_voices = get_available_voices()
     voice = args.voice
     if not voice:
@@ -601,13 +711,28 @@ def main():
         console.print(f"[yellow]Warning: Voice '{voice}' not found on this system. Falling back to system default.[/yellow]")
         voice = None
         
-    voice_name = voice if voice else "System Default"
-    
+    voice_name = premium_voice if premium_mode else (voice if voice else "System Default")
+    if premium_mode:
+        voice_name += " (Premium)"
+        
     chunks = chunk_text(original_text, args.chunk_size)
     num_chunks = len(chunks)
     total_words = len(original_text.split())
     
-    audio = AudioController(voice=voice)
+    temp_dir = "temp_audio"
+    
+    # Pre-download chunks if premium mode is enabled
+    if premium_mode:
+        try:
+            pre_download_chunks(chunks, premium_voice, temp_dir)
+        except Exception as e:
+            console.print(f"[bold red]Error pre-downloading OpenAI TTS speech files: {e}[/bold red]")
+            console.print("[yellow]Falling back to standard offline macOS say.[/yellow]")
+            premium_mode = False
+            cleanup_audio_files(temp_dir)
+            voice_name = voice if voice else "System Default"
+            
+    audio = AudioController(voice=voice, premium_mode=premium_mode)
     
     typed_text = ""
     paused = False
@@ -641,14 +766,25 @@ def main():
                             if delay_remaining > 0:
                                 delay_remaining = max(0.0, delay_remaining - elapsed_time)
                             else:
-                                # Play next chunk. If WPM is low, speak at speak_speed, and pad delay
-                                speak_speed_to_use = max(150, speed) if speed < 150 else speed
-                                # If they configured a custom speak speed originally, respect it
-                                if speed < 150 and args.speak_speed:
-                                    speak_speed_to_use = speak_speed
+                                if premium_mode:
+                                    # Play cached MP3 chunk using afplay
+                                    filepath = os.path.join(temp_dir, f"chunk_{chunk_idx}.mp3")
+                                    speak_speed_to_use = max(150, speed) if speed < 150 else speed
+                                    if speed < 150 and args.speak_speed:
+                                        speak_speed_to_use = speak_speed
+                                    rate_multiplier = speak_speed_to_use / 150.0
                                     
-                                delay_remaining = get_chunk_delay(chunks[chunk_idx], speed, speak_speed_to_use, custom_pause)
-                                audio.play(chunks[chunk_idx], speak_speed_to_use)
+                                    delay_remaining = get_chunk_delay(chunks[chunk_idx], speed, speak_speed_to_use, custom_pause)
+                                    audio.play(filepath, rate_multiplier)
+                                else:
+                                    # Play next text chunk using standard say command
+                                    speak_speed_to_use = max(150, speed) if speed < 150 else speed
+                                    if speed < 150 and args.speak_speed:
+                                        speak_speed_to_use = speak_speed
+                                    
+                                    delay_remaining = get_chunk_delay(chunks[chunk_idx], speed, speak_speed_to_use, custom_pause)
+                                    audio.play(chunks[chunk_idx], speak_speed_to_use)
+                                
                                 chunk_idx += 1
                                 last_redraw_time = 0 # Force immediate redraw
                                 
@@ -788,6 +924,8 @@ def main():
         audio.stop()
         sys.stdout.write("\033[?25h\r\n")
         sys.stdout.flush()
+        if premium_mode:
+            cleanup_audio_files(temp_dir)
         
     # Render final spelling test report
     duration_seconds = time.time() - start_time
