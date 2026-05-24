@@ -44,3 +44,7 @@ Icon
 *.swo
 .project
 .pydevproject
+
+# Dictation State Cache
+previous_test.json
+.temp_audio_cache/

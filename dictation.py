@@ -187,6 +187,35 @@ def get_available_voices():
         return []
 
 
+def save_previous_test(text, target_speed, speak_speed, custom_pause, premium_mode, premium_voice, topic=""):
+    """Saves the details of the spelling test to previous_test.json."""
+    data = {
+        "original_text": text,
+        "target_speed": target_speed,
+        "speak_speed": speak_speed,
+        "custom_pause": custom_pause,
+        "premium_mode": premium_mode,
+        "premium_voice": premium_voice,
+        "topic": topic
+    }
+    try:
+        with open("previous_test.json", "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def load_previous_test():
+    """Loads the details of the previous spelling test from previous_test.json."""
+    if os.path.exists("previous_test.json"):
+        try:
+            with open("previous_test.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+
 def generate_gemini(difficulty, topic=None):
     """Generates spelling dictation text using Gemini API REST endpoint."""
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -268,13 +297,13 @@ def get_ai_text(provider, difficulty):
     
     try:
         if provider == 2:
-            return generate_gemini(diff_name, topic)
+            return generate_gemini(diff_name, topic), topic
         else:
-            return generate_openai(diff_name, topic)
+            return generate_openai(diff_name, topic), topic
     except Exception as e:
         console.print(f"[bold yellow]Warning: Failed to fetch text from {prov_name} ({e}).[/bold yellow]")
         console.print("[yellow]Falling back to curated offline dictionary.[/yellow]")
-        return random.choice(FALLBACK_TEXTS[diff_name])
+        return random.choice(FALLBACK_TEXTS[diff_name]), f"offline {diff_name} fallback"
 
 
 def download_openai_tts(text, voice, filepath):
@@ -515,18 +544,57 @@ def interactive_config_menu():
         border_style="cyan"
     ))
     
+    # Check if a previous test state is cached
+    previous_test = load_previous_test()
+    has_prev = previous_test is not None
+    
     # 1. Text Source
     console.print("\n[bold white]1. Select Text Source:[/bold white]")
-    console.print("  [1] Read local [bold green]input.txt[/bold green] (Default)")
-    console.print("  [2] Generate dynamically using [bold green]Gemini AI[/bold green]")
-    console.print("  [3] Generate dynamically using [bold green]OpenAI AI[/bold green]")
-    
-    choice_src = input("Enter selection [1-3, default 1]: ").strip()
-    source = 1
-    if choice_src in ('2', '3'):
-        source = int(choice_src)
+    if has_prev:
+        topic_desc = f" (Theme: '{previous_test.get('topic', 'N/A')}')"
+        console.print(f"  [1] [bold green]Retry / repeat the previous test[/bold green]{topic_desc} - {previous_test['target_speed']} WPM")
+        console.print("  [2] Read local [bold green]input.txt[/bold green] (Default)")
+        console.print("  [3] Generate dynamically using [bold green]Gemini AI[/bold green]")
+        console.print("  [4] Generate dynamically using [bold green]OpenAI AI[/bold green]")
+    else:
+        console.print("  [1] Read local [bold green]input.txt[/bold green] (Default)")
+        console.print("  [2] Generate dynamically using [bold green]Gemini AI[/bold green]")
+        console.print("  [3] Generate dynamically using [bold green]OpenAI AI[/bold green]")
         
+    choice_src = input(f"Enter selection [default {'2' if has_prev else '1'}]: ").strip()
+    if not choice_src:
+        choice_src = '2' if has_prev else '1'
+        
+    source = 1
+    if has_prev:
+        if choice_src == '1':
+            # Load and return previous test config directly (is_retry = True)
+            return (
+                previous_test['original_text'],
+                previous_test['target_speed'],
+                previous_test['speak_speed'],
+                previous_test['custom_pause'],
+                previous_test['premium_mode'],
+                previous_test['premium_voice'],
+                previous_test.get('topic', ''),
+                True  # is_retry
+            )
+        elif choice_src == '2':
+            source = 1  # input.txt
+        elif choice_src == '3':
+            source = 2  # Gemini
+        elif choice_src == '4':
+            source = 3  # OpenAI
+    else:
+        if choice_src == '1':
+            source = 1  # input.txt
+        elif choice_src == '2':
+            source = 2  # Gemini
+        elif choice_src == '3':
+            source = 3  # OpenAI
+            
     original_text = ""
+    topic = "local input.txt"
     
     if source == 1:
         # Load local input.txt
@@ -558,7 +626,7 @@ def interactive_config_menu():
         elif choice_diff == '3':
             difficulty = "Hard"
             
-        original_text = get_ai_text(source, difficulty)
+        original_text, topic = get_ai_text(source, difficulty)
 
     # 3. Voice Quality selection
     premium_mode = False
@@ -638,7 +706,7 @@ def interactive_config_menu():
             except ValueError:
                 console.print("[red]Invalid input. Please enter 'auto' or a valid decimal number.[/red]")
 
-    return original_text, target_speed, speak_speed, custom_pause, premium_mode, premium_voice
+    return original_text, target_speed, speak_speed, custom_pause, premium_mode, premium_voice, topic, False
 
 
 def main():
@@ -662,6 +730,8 @@ def main():
     custom_pause = args.custom_pause
     premium_mode = args.premium
     premium_voice = args.premium_voice
+    topic = "CLI Config"
+    is_retry = False
     
     # Store standard terminal TTY settings for switching inside main loop
     fd = sys.stdin.fileno()
@@ -674,17 +744,20 @@ def main():
             sys.exit(1)
         with open(args.input, "r", encoding="utf-8") as f:
             original_text = f.read().strip()
+        topic = "CLI input file"
     elif args.generate_difficulty:
         # CLI direct generation (default Gemini if both key found, otherwise checks environment)
         provider = 2 # Gemini
         if not os.environ.get("GEMINI_API_KEY") and os.environ.get("OPENAI_API_KEY"):
             provider = 3 # OpenAI
-        original_text = get_ai_text(provider, args.generate_difficulty)
+        original_text, topic = get_ai_text(provider, args.generate_difficulty)
     else:
         # Interactive configuration
-        original_text, speed, speak_speed, custom_pause, p_mode, p_voice = interactive_config_menu()
+        original_text, speed, speak_speed, custom_pause, p_mode, p_voice, t_name, is_ret = interactive_config_menu()
         premium_mode = p_mode
         premium_voice = p_voice
+        topic = t_name
+        is_retry = is_ret
         
     if not original_text:
         console.print("[bold red]Error: No dictation text loaded.[/bold red]")
@@ -719,19 +792,29 @@ def main():
     num_chunks = len(chunks)
     total_words = len(original_text.split())
     
-    temp_dir = "temp_audio"
+    # Save this run config to previous_test.json if it is not a retry
+    if not is_retry:
+        save_previous_test(original_text, speed, speak_speed, custom_pause, premium_mode, premium_voice, topic)
+        
+    temp_dir = ".temp_audio_cache"
     
     # Pre-download chunks if premium mode is enabled
     if premium_mode:
-        try:
-            pre_download_chunks(chunks, premium_voice, temp_dir)
-        except Exception as e:
-            console.print(f"[bold red]Error pre-downloading OpenAI TTS speech files: {e}[/bold red]")
-            console.print("[yellow]Falling back to standard offline macOS say.[/yellow]")
-            premium_mode = False
-            cleanup_audio_files(temp_dir)
-            voice_name = voice if voice else "System Default"
-            
+        # If it is a retry, check if we can reuse cached files to save API quota and latency
+        cache_valid = os.path.exists(temp_dir) and len(os.listdir(temp_dir)) == num_chunks
+        
+        if is_retry and cache_valid:
+            console.print("[green]Reusing cached premium audio files from previous test.[/green]")
+            time.sleep(1)
+        else:
+            try:
+                pre_download_chunks(chunks, premium_voice, temp_dir)
+            except Exception as e:
+                console.print(f"[bold red]Error pre-downloading OpenAI TTS speech files: {e}[/bold red]")
+                console.print("[yellow]Falling back to standard offline macOS say.[/yellow]")
+                premium_mode = False
+                voice_name = voice if voice else "System Default"
+                
     audio = AudioController(voice=voice, premium_mode=premium_mode)
     
     typed_text = ""
@@ -924,8 +1007,6 @@ def main():
         audio.stop()
         sys.stdout.write("\033[?25h\r\n")
         sys.stdout.flush()
-        if premium_mode:
-            cleanup_audio_files(temp_dir)
         
     # Render final spelling test report
     duration_seconds = time.time() - start_time
