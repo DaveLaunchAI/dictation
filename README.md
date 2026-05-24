@@ -7,10 +7,12 @@ A terminal-based Python application designed to test your spelling accuracy and 
 ## Features
 
 - **Interactive Config Menu**: Choose to type from a local file (`input.txt`) or generate passages dynamically using **Gemini AI** or **OpenAI AI**.
+- **Dynamic Passage Randomization**: Injects a random topic from a list of 20+ fields (e.g. quantum physics, archaeology, geology) into the AI generation prompt, ensuring a fresh, unique paragraph on every single run.
 - **Adjustable Difficulty Levels**: AI-generated texts support **Easy** (common words), **Medium** (spelling bee and advanced writer vocabulary), and **Hard** (challenging orthography and obscure terms) difficulties.
-- **Adaptive Low-WPM Pacing**: Speeds below 150 WPM (supporting down to **10 WPM**) speak word groups at a natural rate and insert calculated pacing delays in between, preventing robotic-sounding TTS audio.
+- **Adaptive Low-WPM Pacing & Custom Pauses**: Speeds below 150 WPM (supporting down to **10 WPM**) speak word groups at a natural rate and insert calculated pacing delays in between. You can customize the individual word speaking WPM and the exact chunk pause time.
 - **Dynamic Progress Indicator**: Displays real-time status bar statistics showing active speed, voice settings, and word-by-word progress (e.g. `Word 55/104 currently dictating`).
-- **Number Key Hotkeys**: Intercepts number keys `1` through `5` for direct playback control, ensuring they do not leak into your text input buffer.
+- **Word-Jumping Control**: Jump to any specific word index in the dictation text at any time during the test and resume playback immediately.
+- **Number Key Hotkeys**: Intercepts number keys `1` through `7` for direct playback control, ensuring they do not leak into your text input buffer.
 - **Case & Punctuation Tolerant Report**: Generates a detailed statistical summary and side-by-side comparison, ignoring capitalization, spacing, and punctuation symbols for spelling score accuracy.
 
 ---
@@ -57,11 +59,14 @@ python dictation.py
 You will be prompted to:
 - Choose your text source (local `input.txt`, Gemini AI, or OpenAI AI).
 - Choose difficulty level (if generating via AI).
+- Configure your Target WPM, Speaking WPM, and Custom Pause seconds (if Target WPM < 150 WPM).
 
 ### 2. Bypass Interactive Menus (CLI Overrides)
 You can directly launch with preset options using CLI flags:
 - `--generate-difficulty` / `-d`: Auto-generate AI text with chosen difficulty (`easy`, `medium`, or `hard`).
-- `--speed` / `-s`: Specify initial speech speed in WPM (default is 175).
+- `--speed` / `-s`: Specify target dictation WPM (default is 175).
+- `--speak-speed`: Specify individual word speaking WPM for low-WPM pacing (>= 150).
+- `--custom-pause`: Force custom pause duration between word chunks in seconds.
 - `--input` / `-i`: Path to a custom text file.
 - `--voice` / `-v`: Specify a custom macOS speech voice name (e.g. `Samantha` or `Daniel`).
 
@@ -70,8 +75,8 @@ Examples:
 # Auto-generate a medium-difficulty passage
 python dictation.py --generate-difficulty medium
 
-# Read from a custom file at a slow speed of 80 WPM
-python dictation.py --input test_text.txt --speed 80
+# Read from input.txt at 60 WPM, speaking words at 180 WPM with a fixed 3.0s pause
+python dictation.py --speed 60 --speak-speed 180 --custom-pause 3.0
 ```
 
 ---
@@ -85,7 +90,9 @@ While the dictation test is running, type what you hear. The following single-nu
 - **`3`**: Faster (increases dictation speed by 15 WPM and restarts the current sentence).
 - **`4`**: Restart (resets dictation from the beginning and clears your typing buffer).
 - **`5`**: Submit & Finish (stops playback and runs spelling scoring comparison).
-- **`Ctrl + C`**: Cancel & Exit (aborts the test immediately without printing a report).
+- **`6`**: Cancel & Exit (aborts the test session cleanly with no spelling diff report printed).
+- **`7`**: Jump to Word (temporarily exits raw mode to prompt for a target word number, then resumes playback from there).
+- **`Ctrl + C`**: Cancel & Exit (standard terminal interrupt).
 
 ---
 

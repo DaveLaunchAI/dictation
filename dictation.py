@@ -26,6 +26,30 @@ except ImportError:
     print("Please install it with: pip install rich")
     sys.exit(1)
 
+# Educational topics for prompt randomization to ensure unique generated passages
+TOPICS = [
+    "astronomy and deep space exploration",
+    "botany, plant biology, and ancient forests",
+    "volcanoes, plate tectonics, and geology",
+    "oceanography, deep sea vents, and marine life",
+    "classical music history, orchestras, and composers",
+    "ancient architectural wonders and construction methods",
+    "wildlife conservation, endangered species, and ecology",
+    "meticulous gourmet culinary arts and pastry baking",
+    "aerodynamics, early aviation history, and flight",
+    "meteorology, severe storms, and atmospheric science",
+    "archaeology, lost civilizations, and fossil hunting",
+    "organic chemistry, laboratory synthesis, and elements",
+    "cognitive psychology, neuroscience, and memory",
+    "renewable energy, solar cells, and wind turbines",
+    "epic fantasy literature, world-building, and mythology",
+    "microscopic organisms, cell division, and bacteria",
+    "sustainable farming, organic agriculture, and soils",
+    "mountaineering, alpine peaks, and glacier exploration",
+    "philosophical debates, logic, and reasoning theories",
+    "the physics of light, lasers, and quantum mechanics"
+]
+
 # Curated offline fallback spelling-test texts (at least 100 words each)
 FALLBACK_TEXTS = {
     "easy": [
@@ -152,7 +176,7 @@ def get_available_voices():
         return []
 
 
-def generate_gemini(difficulty):
+def generate_gemini(difficulty, topic=None):
     """Generates spelling dictation text using Gemini API REST endpoint."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -160,8 +184,9 @@ def generate_gemini(difficulty):
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
+    topic_str = f" The theme of the passage should be loosely related to: {topic}." if topic else ""
     prompt = (
-        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test. "
+        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str} "
         f"The difficulty level is {difficulty}. "
         f"For Easy: Use common vocabulary, simple spelling words. "
         f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
@@ -187,7 +212,7 @@ def generate_gemini(difficulty):
         return text
 
 
-def generate_openai(difficulty):
+def generate_openai(difficulty, topic=None):
     """Generates spelling dictation text using OpenAI API REST endpoint."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -195,8 +220,9 @@ def generate_openai(difficulty):
         
     url = "https://api.openai.com/v1/chat/completions"
     
+    topic_str = f" The theme of the passage should be loosely related to: {topic}." if topic else ""
     prompt = (
-        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test. "
+        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str} "
         f"The difficulty level is {difficulty}. "
         f"For Easy: Use common vocabulary, simple spelling words. "
         f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
@@ -226,13 +252,14 @@ def get_ai_text(provider, difficulty):
     """Fetches AI generated spelling text, falling back gracefully to local text if APIs fail."""
     prov_name = "Gemini" if provider == 2 else "OpenAI"
     diff_name = difficulty.lower()
-    console.print(f"[cyan]Connecting to {prov_name} API to generate {diff_name} spelling text...[/cyan]")
+    topic = random.choice(TOPICS)
+    console.print(f"[cyan]Connecting to {prov_name} API to generate {diff_name} spelling text themed around '{topic}'...[/cyan]")
     
     try:
         if provider == 2:
-            return generate_gemini(diff_name)
+            return generate_gemini(diff_name, topic)
         else:
-            return generate_openai(diff_name)
+            return generate_openai(diff_name, topic)
     except Exception as e:
         console.print(f"[bold yellow]Warning: Failed to fetch text from {prov_name} ({e}).[/bold yellow]")
         console.print("[yellow]Falling back to curated offline dictionary.[/yellow]")
@@ -248,8 +275,21 @@ def chunk_text(text, chunk_size):
     return chunks
 
 
-def get_chunk_delay(chunk, target_speed, speak_speed):
+def find_chunk_for_word(chunks, word_num):
+    """Finds the chunk index that contains the target word index (1-based)."""
+    cumulative = 0
+    for idx, chunk in enumerate(chunks):
+        words_in_chunk = len(chunk.split())
+        if cumulative < word_num <= cumulative + words_in_chunk:
+            return idx
+        cumulative += words_in_chunk
+    return len(chunks) - 1  # Fallback to the last chunk if target is out of bounds
+
+
+def get_chunk_delay(chunk, target_speed, speak_speed, custom_pause=None):
     """Calculates padding delay to simulate target speed without drawing out words."""
+    if custom_pause is not None:
+        return custom_pause
     if target_speed >= 150:
         return 0.0
     words_count = len(chunk.split())
@@ -296,7 +336,9 @@ def draw_screen(typed_text, paused, target_speed, start_word, total_words, voice
         f"[bold yellow]2[/bold yellow] Slower | "
         f"[bold yellow]3[/bold yellow] Faster | "
         f"[bold yellow]4[/bold yellow] Restart | "
-        f"[bold yellow]5[/bold yellow] Submit & Finish"
+        f"[bold yellow]5[/bold yellow] Submit | "
+        f"[bold yellow]6[/bold yellow] Cancel | "
+        f"[bold yellow]7[/bold yellow] Jump to Word"
     )
     
     header_panel = Panel(
@@ -450,13 +492,63 @@ def interactive_config_menu():
             
         original_text = get_ai_text(source, difficulty)
 
-    return original_text
+    # 3. Speed & Pacing Config
+    console.print("\n[bold white]3. Configure Playback Speed:[/bold white]")
+    while True:
+        try:
+            speed_input = input("Enter target WPM speed (10-350) [default 175]: ").strip()
+            if not speed_input:
+                target_speed = 175
+                break
+            target_speed = int(speed_input)
+            if 10 <= target_speed <= 350:
+                break
+            console.print("[red]Please enter a speed between 10 and 350 WPM.[/red]")
+        except ValueError:
+            console.print("[red]Invalid input. Please enter a valid number.[/red]")
+            
+    speak_speed = max(150, target_speed)
+    custom_pause = None
+    
+    if target_speed < 150:
+        console.print(f"\n[bold yellow]Notice: Target speed ({target_speed} WPM) is below 150 WPM. Pacing chunks is recommended.[/bold yellow]")
+        # Ask for speak speed
+        while True:
+            try:
+                speak_input = input("Enter speaking WPM speed for individual words (150-250) [default 150]: ").strip()
+                if not speak_input:
+                    speak_speed = 150
+                    break
+                speak_speed = int(speak_input)
+                if 150 <= speak_speed <= 250:
+                    break
+                console.print("[red]Please enter a speed between 150 and 250 WPM.[/red]")
+            except ValueError:
+                console.print("[red]Invalid input. Please enter a valid number.[/red]")
+                
+        # Ask for custom pause
+        while True:
+            pause_input = input("Enter custom pause duration in seconds (or 'auto' to calculate based on WPM) [default auto]: ").strip().lower()
+            if not pause_input or pause_input == 'auto':
+                custom_pause = None
+                break
+            try:
+                custom_pause = float(pause_input)
+                if 0.0 <= custom_pause <= 60.0:
+                    break
+                console.print("[red]Please enter a pause duration between 0.0 and 60.0 seconds.[/red]")
+            except ValueError:
+                console.print("[red]Invalid input. Please enter 'auto' or a valid decimal number.[/red]")
+
+    return original_text, target_speed, speak_speed, custom_pause
 
 
 def main():
     parser = argparse.ArgumentParser(description="Terminal-based Spelling Dictation App")
     parser.add_argument("--voice", "-v", type=str, default=None, help="TTS Voice Name (e.g., Samantha, Daniel)")
     parser.add_argument("--speed", "-s", type=int, default=175, help="Initial speech speed in WPM (default: 175)")
+    parser.add_argument("--speak-speed", type=int, default=None, help="TTS speaking rate for low-WPM chunk pacing (>= 150)")
+    parser.add_argument("--custom-pause", type=float, default=None, help="Force custom pause between chunks in seconds")
     parser.add_argument("--chunk-size", "-c", type=int, default=6, help="Words spoken per chunk (default: 6)")
     parser.add_argument("--input", "-i", type=str, default=None, help="Input text file path (skips interactive config)")
     parser.add_argument("--generate-difficulty", "-d", type=str, choices=["easy", "medium", "hard"], default=None,
@@ -464,6 +556,13 @@ def main():
     args = parser.parse_args()
 
     original_text = ""
+    speed = args.speed
+    speak_speed = args.speak_speed if args.speak_speed else max(150, speed)
+    custom_pause = args.custom_pause
+    
+    # Store standard terminal TTY settings for switching inside main loop
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
     
     # Decide text source: CLI overrides or interactive menu
     if args.input:
@@ -480,7 +579,7 @@ def main():
         original_text = get_ai_text(provider, args.generate_difficulty)
     else:
         # Interactive configuration
-        original_text = interactive_config_menu()
+        original_text, speed, speak_speed, custom_pause = interactive_config_menu()
         
     if not original_text:
         console.print("[bold red]Error: No dictation text loaded.[/bold red]")
@@ -511,7 +610,6 @@ def main():
     audio = AudioController(voice=voice)
     
     typed_text = ""
-    speed = args.speed
     paused = False
     chunk_idx = 0
     delay_remaining = 0.0
@@ -543,10 +641,14 @@ def main():
                             if delay_remaining > 0:
                                 delay_remaining = max(0.0, delay_remaining - elapsed_time)
                             else:
-                                # Play next chunk. If WPM is low, speak at natural 150 WPM, and pad delay
-                                speak_speed = max(150, speed)
-                                delay_remaining = get_chunk_delay(chunks[chunk_idx], speed, speak_speed)
-                                audio.play(chunks[chunk_idx], speak_speed)
+                                # Play next chunk. If WPM is low, speak at speak_speed, and pad delay
+                                speak_speed_to_use = max(150, speed) if speed < 150 else speed
+                                # If they configured a custom speak speed originally, respect it
+                                if speed < 150 and args.speak_speed:
+                                    speak_speed_to_use = speak_speed
+                                    
+                                delay_remaining = get_chunk_delay(chunks[chunk_idx], speed, speak_speed_to_use, custom_pause)
+                                audio.play(chunks[chunk_idx], speak_speed_to_use)
                                 chunk_idx += 1
                                 last_redraw_time = 0 # Force immediate redraw
                                 
@@ -613,6 +715,53 @@ def main():
                         audio.stop()
                         break
                         
+                    elif char == '6':  # 6 -> Cancel & Exit
+                        audio.stop()
+                        sys.stdout.write("\033[?25h\r\n\033[31mCancelled.\033[0m\r\n")
+                        sys.stdout.flush()
+                        return
+                        
+                    elif char == '7':  # 7 -> Jump to Word
+                        # Stop active speech
+                        audio.stop()
+                        
+                        # Temporarily restore terminal raw mode settings to allow standard input
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                        
+                        # Show terminal cursor and add newlines for visual clarity
+                        sys.stdout.write("\033[?25h\r\n")
+                        sys.stdout.flush()
+                        
+                        try:
+                            word_input = input(f"Enter word number to jump to (1-{total_words}): ").strip()
+                            if word_input:
+                                target_word = int(word_input)
+                                if 1 <= target_word <= total_words:
+                                    chunk_idx = find_chunk_for_word(chunks, target_word)
+                                    delay_remaining = 0.0
+                                    paused = False
+                                    last_redraw_time = 0
+                                else:
+                                    console.print(f"[red]Word number must be between 1 and {total_words}.[/red]")
+                                    time.sleep(1.5)
+                        except ValueError:
+                            console.print("[red]Invalid input. Must be a valid number.[/red]")
+                            time.sleep(1.5)
+                        finally:
+                            # Re-enter raw terminal mode
+                            tty.setraw(fd)
+                            new_settings = termios.tcgetattr(fd)
+                            new_settings[2] = new_settings[2] & ~termios.IXON
+                            termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
+                            
+                            # Hide cursor again
+                            sys.stdout.write("\033[?25l")
+                            # Clear the console prompt lines to keep typing screen clean
+                            sys.stdout.write("\033[2J\033[H")
+                            sys.stdout.flush()
+                            last_redraw_time = 0
+                            last_loop_time = time.time()  # Reset loop time to prevent pacing jumps
+                        
                     elif char == '\x1b':  # Escape sequence (e.g. arrow keys)
                         # Consume extra characters of arrow key sequence to prevent garbage characters
                         r2, _, _ = select.select([sys.stdin], [], [], 0.02)
@@ -629,7 +778,9 @@ def main():
                         last_redraw_time = 0
                         
                     elif ord(char) >= 32 and ord(char) < 127:  # Printable character
-                        typed_text += char
+                        # Avoid allowing 1-7 keys to leak through to typed text if pressed in normal typing
+                        if char not in ('1', '2', '3', '4', '5', '6', '7'):
+                            typed_text += char
                         last_redraw_time = 0
                         
     finally:
