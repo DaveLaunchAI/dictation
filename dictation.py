@@ -1,0 +1,647 @@
+#!/usr/bin/env python3
+import sys
+import os
+import tty
+import termios
+import select
+import subprocess
+import signal
+import time
+import re
+import difflib
+import argparse
+import urllib.request
+import json
+import random
+
+# Try to import rich packages, otherwise output standard error
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.table import Table
+    console = Console()
+except ImportError:
+    print("Error: The 'rich' library is required to run this application.")
+    print("Please install it with: pip install rich")
+    sys.exit(1)
+
+# Curated offline fallback spelling-test texts (at least 100 words each)
+FALLBACK_TEXTS = {
+    "easy": [
+        "The quick brown fox jumps over the lazy dog in a peaceful country meadow where green grass grows tall. "
+        "Every morning, birds sing sweet songs from the branches of the ancient trees, while the bright sun shines down upon the garden. "
+        "Children gather here to play together, throwing a colorful ball and running through the flowers. "
+        "It is a wonderful day to practice your typing, keeping your attention focused on each word as you hear it. "
+        "Please make sure to type every word slowly and carefully, and do your best to avoid any spelling mistakes. Good luck!",
+        
+        "Learning to spell new words is a fun journey that helps us express our thoughts more clearly in writing. "
+        "When we read books, we discover how letters combine to make interesting sounds that form common sentences. "
+        "Practice makes perfect, so we should write every day, trying our best to remember all the basic spelling rules. "
+        "Do not worry if you make some mistakes at first, because we learn from our errors and get better over time. "
+        "Focus on the sound of the voice, type what you hear in the terminal, and enjoy the dictation exercise."
+    ],
+    "medium": [
+        "It is definitely necessary to separate the concepts when you accommodate guests. "
+        "Please ensure you receive their independent feedback after each occurrence, as their conscience might reveal a subtle threshold of satisfaction. "
+        "The hierarchy of spelling bee vocabulary is quite surprising, and you will notice that maintaining focus requires immense concentration. "
+        "A well-versed writer should comfortably master these advanced nouns and verbs. "
+        "As you progress, try to stay calm and listen closely to the rhythm of the voice. "
+        "This training will significantly improve your spelling and typing precision. Keep typing what you hear until the dictation is complete.",
+        
+        "A successful writer must possess a diverse vocabulary to keep readers engaged throughout the entire story. "
+        "Words like convenience, restaurant, and persistent are frequently used, yet they are often misspelled by many people. "
+        "By practicing dictation regularly, you train your brain to recognize the relationship between speech sounds and letters. "
+        "This exercise will establish a strong foundation for your spelling skills and boost your confidence in professional writing. "
+        "Keep your keyboard ready, concentrate on the current word, and complete the spelling challenge with maximum attention."
+    ],
+    "hard": [
+        "His idiosyncrasy was to supersede the standard liaison, resulting in a cacophony that convalesced into a mischievous pharaoh's pronunciation. "
+        "The committee found the bureaucrat's behavior during the millennium liaison to be a highly regrettable occurrence, especially since he lacked the necessary rhythm to navigate the vacuum. "
+        "An independent hierarchy of foreign vocabulary, including words like gourmet, reservoir, and silhouette, can easily lead to misspelling. "
+        "A well-versed writer must have the conscience and threshold to recognize these obscure nouns. "
+        "Do not let these eccentric spellings cause you to lose your attention. Type every syllable exactly as it is enunciated by the voice.",
+        
+        "To achieve a flawless score on this dictation test, you must be prepared for rare orthographic challenges that baffle even lexicographers. "
+        "The occurrence of words like questionnaire, entrepreneur, and occurrence can easily disrupt your spelling confidence if your attention wavers. "
+        "Remember that punctuation and capitalization are completely ignored in the scoring, so focus entirely on typing the correct letters. "
+        "Pay close attention to double consonants and silent letters that hide within obscure academic terminology. "
+        "Only a dedicated student of the language will achieve accuracy when writing these complex sentences under real-time conditions."
+    ]
+}
+
+
+class RawTerminal:
+    """Context manager to put the terminal into raw mode and disable local echo
+    and flow control (IXON)."""
+    def __enter__(self):
+        self.fd = sys.stdin.fileno()
+        self.old_settings = termios.tcgetattr(self.fd)
+        
+        # Put terminal in raw mode
+        tty.setraw(self.fd)
+        
+        # Disable flow control (IXON) so Ctrl+S or other flow controls don't intercept inputs
+        new_settings = termios.tcgetattr(self.fd)
+        new_settings[2] = new_settings[2] & ~termios.IXON
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, new_settings)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore terminal settings
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+
+
+class AudioController:
+    """Manages the background macOS 'say' subprocess for Text-to-Speech."""
+    def __init__(self, voice=None):
+        self.voice = voice
+        self.proc = None
+        self.is_paused = False
+
+    def play(self, text, rate):
+        self.stop()
+        self.is_paused = False
+        
+        cmd = ['say']
+        if self.voice:
+            cmd.extend(['-v', self.voice])
+        cmd.extend(['-r', str(rate), text])
+        
+        # Redirect stdout/stderr to devnull to avoid garbling terminal UI
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def pause(self):
+        if self.proc and self.proc.poll() is None and not self.is_paused:
+            self.proc.send_signal(signal.SIGSTOP)
+            self.is_paused = True
+
+    def resume(self):
+        if self.proc and self.proc.poll() is None and self.is_paused:
+            self.proc.send_signal(signal.SIGCONT)
+            self.is_paused = False
+
+    def stop(self):
+        if self.proc:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+            self.proc = None
+        self.is_paused = False
+
+    def is_finished(self):
+        if self.proc is None:
+            return True
+        return self.proc.poll() is not None
+
+
+def get_available_voices():
+    """Queries system for available speech voices on macOS."""
+    try:
+        res = subprocess.run(['say', '-v', '?'], capture_output=True, text=True, check=True)
+        voices = []
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if parts:
+                voices.append(parts[0])
+        return voices
+    except Exception:
+        return []
+
+
+def generate_gemini(difficulty):
+    """Generates spelling dictation text using Gemini API REST endpoint."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable not found.")
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    
+    prompt = (
+        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test. "
+        f"The difficulty level is {difficulty}. "
+        f"For Easy: Use common vocabulary, simple spelling words. "
+        f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
+        f"For Hard: Include challenging spelling bee words, obscure nouns, and words with non-phonetic spellings (e.g., idiosyncrasy, supersede, convalesce, pharaoh, liaison, cacophony, mischievous, pronunciation). "
+        f"Keep the text natural, coherent, and grammatically correct. Do not use any numeric digits (e.g., write 'five' instead of '5'). "
+        f"Do not include any formatting, markdown, titles, or numbering. Output ONLY the passage text itself."
+    )
+    
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{
+            "parts": [{
+                "text": prompt
+            }]
+        }]
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers, method='POST')
+    
+    with urllib.request.urlopen(req, timeout=10) as response:
+        res_data = json.loads(response.read().decode('utf-8'))
+        text = res_data['candidates'][0]['content']['parts'][0]['text'].strip()
+        return text
+
+
+def generate_openai(difficulty):
+    """Generates spelling dictation text using OpenAI API REST endpoint."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable not found.")
+        
+    url = "https://api.openai.com/v1/chat/completions"
+    
+    prompt = (
+        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test. "
+        f"The difficulty level is {difficulty}. "
+        f"For Easy: Use common vocabulary, simple spelling words. "
+        f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
+        f"For Hard: Include challenging spelling bee words, obscure nouns, and words with non-phonetic spellings (e.g., idiosyncrasy, supersede, convalesce, pharaoh, liaison, cacophony, mischievous, pronunciation). "
+        f"Keep the text natural, coherent, and grammatically correct. Do not use any numeric digits (e.g., write 'five' instead of '5'). "
+        f"Do not include any formatting, markdown, titles, or numbering. Output ONLY the passage text itself."
+    )
+    
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}'
+    }
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers, method='POST')
+    
+    with urllib.request.urlopen(req, timeout=10) as response:
+        res_data = json.loads(response.read().decode('utf-8'))
+        text = res_data['choices'][0]['message']['content'].strip()
+        return text
+
+
+def get_ai_text(provider, difficulty):
+    """Fetches AI generated spelling text, falling back gracefully to local text if APIs fail."""
+    prov_name = "Gemini" if provider == 2 else "OpenAI"
+    diff_name = difficulty.lower()
+    console.print(f"[cyan]Connecting to {prov_name} API to generate {diff_name} spelling text...[/cyan]")
+    
+    try:
+        if provider == 2:
+            return generate_gemini(diff_name)
+        else:
+            return generate_openai(diff_name)
+    except Exception as e:
+        console.print(f"[bold yellow]Warning: Failed to fetch text from {prov_name} ({e}).[/bold yellow]")
+        console.print("[yellow]Falling back to curated offline dictionary.[/yellow]")
+        return random.choice(FALLBACK_TEXTS[diff_name])
+
+
+def chunk_text(text, chunk_size):
+    """Splits text into chunks of specified word count."""
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size):
+        chunks.append(" ".join(words[i:i+chunk_size]))
+    return chunks
+
+
+def get_chunk_delay(chunk, target_speed, speak_speed):
+    """Calculates padding delay to simulate target speed without drawing out words."""
+    if target_speed >= 150:
+        return 0.0
+    words_count = len(chunk.split())
+    target_duration = (words_count / target_speed) * 60.0
+    speak_duration = (words_count / speak_speed) * 60.0
+    return max(0.0, target_duration - speak_duration)
+
+
+def draw_screen(typed_text, paused, target_speed, start_word, total_words, voice_name, is_audio_finished, delay_remaining):
+    """Redraws the full-screen terminal interface in-place to prevent flickering."""
+    # Move cursor to top-left of the viewport
+    sys.stdout.write("\033[H")
+    sys.stdout.flush()
+    
+    # Format status text and colors
+    if start_word >= total_words and is_audio_finished and delay_remaining <= 0:
+        status_color = "cyan"
+        status_text = "SPEECH FINISHED"
+        progress_str = f"Completed {total_words}/{total_words} words"
+    elif paused:
+        status_color = "yellow"
+        status_text = "PAUSED"
+        progress_str = f"Word {start_word}/{total_words} currently dictating"
+    elif not is_audio_finished:
+        status_color = "green"
+        status_text = "SPEAKING"
+        progress_str = f"Word {start_word}/{total_words} currently dictating"
+    elif delay_remaining > 0:
+        status_color = "blue"
+        status_text = f"PACING DELAY ({delay_remaining:.1f}s)"
+        progress_str = f"Word {start_word}/{total_words} currently dictating"
+    else:
+        status_color = "green"
+        status_text = "PLAYING"
+        progress_str = f"Word {start_word}/{total_words} currently dictating"
+        
+    header_content = (
+        f"[bold cyan]Spelling Dictation & Attention Test[/bold cyan]\n"
+        f"Voice: [bold magenta]{voice_name}[/bold magenta] | "
+        f"Status: [bold {status_color}]{status_text}[/bold {status_color}] | "
+        f"Speed: [bold white]{target_speed} WPM[/bold white] | "
+        f"Progress: [bold white]{progress_str}[/bold white]\n"
+        f"Shortcuts: [bold yellow]1[/bold yellow] Pause/Play | "
+        f"[bold yellow]2[/bold yellow] Slower | "
+        f"[bold yellow]3[/bold yellow] Faster | "
+        f"[bold yellow]4[/bold yellow] Restart | "
+        f"[bold yellow]5[/bold yellow] Submit & Finish"
+    )
+    
+    header_panel = Panel(
+        header_content,
+        title="[bold magenta]Controls & Info[/bold magenta]",
+        border_style="magenta",
+        expand=True
+    )
+    
+    console.print(header_panel)
+    console.print("\n[bold white]Type what you hear below (suggestions, auto-correct, case & punctuation ignored):[/bold white]\n")
+    
+    # Render typed text with cursor block. Replace newlines with \r\n for TTY raw mode compatibility
+    display_text = (typed_text + "█").replace("\n", "\r\n")
+    console.print(display_text, end="")
+    
+    # Clear anything remaining below the cursor
+    sys.stdout.write("\033[J")
+    sys.stdout.flush()
+
+
+def print_report(original_text, typed_text, duration_seconds):
+    """Generates and prints a detailed spelling accuracy report."""
+    orig_words = original_text.split()
+    typed_words = typed_text.split()
+    
+    # Normalize words to strip punctuation and lowercase for spelling comparison
+    def normalize(word):
+        return re.sub(r'[^\w]', '', word).lower()
+        
+    orig_normalized = [normalize(w) for w in orig_words]
+    typed_normalized = [normalize(w) for w in typed_words]
+    
+    matcher = difflib.SequenceMatcher(None, orig_normalized, typed_normalized)
+    
+    correct_count = 0
+    misspelled_count = 0
+    missed_count = 0
+    extra_count = 0
+    
+    formatted_diff = []
+    
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for idx in range(i1, i2):
+                formatted_diff.append(f"[green]{orig_words[idx]}[/green]")
+                correct_count += 1
+        elif tag == 'replace':
+            # Highlight misspellings and insertions/deletions within replacements
+            for idx in range(max(i2 - i1, j2 - j1)):
+                o_idx = i1 + idx
+                t_idx = j1 + idx
+                if o_idx < i2 and t_idx < j2:
+                    formatted_diff.append(f"[bold red]\\[{orig_words[o_idx]}][/bold red]->[bold yellow]({typed_words[t_idx]})[/bold yellow]")
+                    misspelled_count += 1
+                elif o_idx < i2:
+                    formatted_diff.append(f"[bold red]\\[{orig_words[o_idx]}][/bold red]")
+                    missed_count += 1
+                elif t_idx < j2:
+                    formatted_diff.append(f"[bold cyan]({typed_words[t_idx]})[/bold cyan]")
+                    extra_count += 1
+        elif tag == 'delete':
+            for idx in range(i1, i2):
+                formatted_diff.append(f"[bold red]\\[{orig_words[idx]}][/bold red]")
+                missed_count += 1
+        elif tag == 'insert':
+            for idx in range(j1, j2):
+                formatted_diff.append(f"[bold cyan]({typed_words[idx]})[/bold cyan]")
+                extra_count += 1
+                
+    accuracy = (correct_count / len(orig_words) * 100) if orig_words else 0.0
+    wpm = (len(typed_words) / (duration_seconds / 60)) if duration_seconds > 0 else 0.0
+    
+    summary_table = Table(title="Spelling Test Summary", title_style="bold magenta", border_style="magenta")
+    summary_table.add_column("Metric", style="cyan")
+    summary_table.add_column("Value", style="white")
+    
+    summary_table.add_row("Accuracy Score", f"[bold green]{accuracy:.1f}%[/bold green]" if accuracy >= 90 else f"[bold yellow]{accuracy:.1f}%[/bold yellow]")
+    summary_table.add_row("Typing Speed", f"{wpm:.1f} WPM")
+    summary_table.add_row("Correct Words", f"{correct_count}")
+    summary_table.add_row("Misspelled Words", f"{misspelled_count}")
+    summary_table.add_row("Missed Words (Skipped)", f"{missed_count}")
+    summary_table.add_row("Extra Words (Inserted)", f"{extra_count}")
+    summary_table.add_row("Total Time Taken", f"{duration_seconds:.1f} seconds")
+    
+    console.print("\n")
+    console.print(Panel(
+        summary_table,
+        title="[bold green]Test Complete[/bold green]",
+        border_style="green",
+        expand=False
+    ))
+    
+    console.print("\n[bold white]Word-by-word Comparison:[/bold white]")
+    console.print("[dim italic]Legend: [green]Correct[/green] | [bold red]\\[Missed][/bold red] | [bold red]\\[Original][/bold red]->[bold yellow](Typed)[/bold yellow] | [bold cyan](Extra)[/bold cyan][/dim italic]\n")
+    
+    diff_text = " ".join(formatted_diff)
+    console.print(Panel(diff_text, border_style="blue", title="[bold blue]Comparison Report[/bold blue]", expand=True))
+
+
+def interactive_config_menu():
+    """Renders interactive startup configuration menu in TTY."""
+    console.print(Panel(
+        "[bold cyan]Welcome to the Spelling Dictation & Attention Test![/bold cyan]\n"
+        "Configure your options below.",
+        border_style="cyan"
+    ))
+    
+    # 1. Text Source
+    console.print("\n[bold white]1. Select Text Source:[/bold white]")
+    console.print("  [1] Read local [bold green]input.txt[/bold green] (Default)")
+    console.print("  [2] Generate dynamically using [bold green]Gemini AI[/bold green]")
+    console.print("  [3] Generate dynamically using [bold green]OpenAI AI[/bold green]")
+    
+    choice_src = input("Enter selection [1-3, default 1]: ").strip()
+    source = 1
+    if choice_src in ('2', '3'):
+        source = int(choice_src)
+        
+    original_text = ""
+    
+    if source == 1:
+        # Load local input.txt
+        if not os.path.exists("input.txt"):
+            console.print("[yellow]input.txt not found. Creating a default file...[/yellow]")
+            default_content = (
+                "It is definitely necessary to separate the concepts when you accommodate guests. "
+                "Please ensure you receive their independent feedback after each occurrence, as their conscience might reveal a subtle threshold of satisfaction. "
+                "The hierarchy of spelling bee vocabulary is quite surprising, and you will notice that maintaining focus requires immense concentration. "
+                "A well-versed writer should comfortably master these advanced nouns and verbs. "
+                "As you progress, try to stay calm and listen closely to the rhythm of the voice. "
+                "This training will significantly improve your spelling and typing precision. Keep typing what you hear until the dictation is complete."
+            )
+            with open("input.txt", "w", encoding="utf-8") as f:
+                f.write(default_content)
+        with open("input.txt", "r", encoding="utf-8") as f:
+            original_text = f.read().strip()
+    else:
+        # Ask for difficulty
+        console.print("\n[bold white]2. Select AI Difficulty Level:[/bold white]")
+        console.print("  [1] Easy (basic spelling)")
+        console.print("  [2] Medium (spelling bee & advanced writer vocabulary) (Default)")
+        console.print("  [3] Hard (highly challenging spelling bee and obscure words)")
+        
+        choice_diff = input("Enter selection [1-3, default 2]: ").strip()
+        difficulty = "Medium"
+        if choice_diff == '1':
+            difficulty = "Easy"
+        elif choice_diff == '3':
+            difficulty = "Hard"
+            
+        original_text = get_ai_text(source, difficulty)
+
+    return original_text
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Terminal-based Spelling Dictation App")
+    parser.add_argument("--voice", "-v", type=str, default=None, help="TTS Voice Name (e.g., Samantha, Daniel)")
+    parser.add_argument("--speed", "-s", type=int, default=175, help="Initial speech speed in WPM (default: 175)")
+    parser.add_argument("--chunk-size", "-c", type=int, default=6, help="Words spoken per chunk (default: 6)")
+    parser.add_argument("--input", "-i", type=str, default=None, help="Input text file path (skips interactive config)")
+    parser.add_argument("--generate-difficulty", "-d", type=str, choices=["easy", "medium", "hard"], default=None,
+                        help="Auto-generate AI text with chosen difficulty (skips interactive config, uses Gemini by default)")
+    args = parser.parse_args()
+
+    original_text = ""
+    
+    # Decide text source: CLI overrides or interactive menu
+    if args.input:
+        if not os.path.exists(args.input):
+            console.print(f"[bold red]Error: Input file '{args.input}' not found.[/bold red]")
+            sys.exit(1)
+        with open(args.input, "r", encoding="utf-8") as f:
+            original_text = f.read().strip()
+    elif args.generate_difficulty:
+        # CLI direct generation (default Gemini if both key found, otherwise checks environment)
+        provider = 2 # Gemini
+        if not os.environ.get("GEMINI_API_KEY") and os.environ.get("OPENAI_API_KEY"):
+            provider = 3 # OpenAI
+        original_text = get_ai_text(provider, args.generate_difficulty)
+    else:
+        # Interactive configuration
+        original_text = interactive_config_menu()
+        
+    if not original_text:
+        console.print("[bold red]Error: No dictation text loaded.[/bold red]")
+        sys.exit(1)
+        
+    # Get available voices and select a default if none specified
+    available_voices = get_available_voices()
+    voice = args.voice
+    if not voice:
+        # Preferred default voices
+        for v in ["Samantha", "Daniel", "Alex", "Fred"]:
+            if v in available_voices:
+                voice = v
+                break
+        if not voice and available_voices:
+            voice = available_voices[0]
+            
+    if voice and voice not in available_voices:
+        console.print(f"[yellow]Warning: Voice '{voice}' not found on this system. Falling back to system default.[/yellow]")
+        voice = None
+        
+    voice_name = voice if voice else "System Default"
+    
+    chunks = chunk_text(original_text, args.chunk_size)
+    num_chunks = len(chunks)
+    total_words = len(original_text.split())
+    
+    audio = AudioController(voice=voice)
+    
+    typed_text = ""
+    speed = args.speed
+    paused = False
+    chunk_idx = 0
+    delay_remaining = 0.0
+    
+    # Hide terminal cursor while redrawing
+    sys.stdout.write("\033[?25l")
+    sys.stdout.flush()
+    
+    # Clear screen initially
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+    
+    start_time = time.time()
+    last_redraw_time = 0
+    last_loop_time = time.time()
+    
+    try:
+        with RawTerminal():
+            while True:
+                now = time.time()
+                elapsed_time = now - last_loop_time
+                last_loop_time = now
+                
+                # Check playback progression
+                if not paused:
+                    if chunk_idx < num_chunks:
+                        # If audio is playing, do nothing. If audio completed, tick down padding delay
+                        if audio.is_finished():
+                            if delay_remaining > 0:
+                                delay_remaining = max(0.0, delay_remaining - elapsed_time)
+                            else:
+                                # Play next chunk. If WPM is low, speak at natural 150 WPM, and pad delay
+                                speak_speed = max(150, speed)
+                                delay_remaining = get_chunk_delay(chunks[chunk_idx], speed, speak_speed)
+                                audio.play(chunks[chunk_idx], speak_speed)
+                                chunk_idx += 1
+                                last_redraw_time = 0 # Force immediate redraw
+                                
+                # Periodic or event-driven screen redraw
+                if now - last_redraw_time > 0.1:
+                    # Calculate active word count for progress
+                    active_idx = max(0, chunk_idx - 1)
+                    if chunk_idx == 0:
+                        start_word = 1
+                    else:
+                        start_word = sum(len(c.split()) for c in chunks[:active_idx]) + 1
+                    start_word = min(start_word, total_words)
+                    
+                    draw_screen(typed_text, paused, speed, start_word, total_words, voice_name, audio.is_finished(), delay_remaining)
+                    last_redraw_time = now
+                    
+                # Read keyboard input without blocking
+                r, _, _ = select.select([sys.stdin], [], [], 0.02)
+                if r:
+                    char = sys.stdin.read(1)
+                    
+                    if char == '\x03':  # Ctrl+C -> Cancel
+                        audio.stop()
+                        sys.stdout.write("\033[?25h\r\n\033[31mCancelled.\033[0m\r\n")
+                        sys.stdout.flush()
+                        return
+                        
+                    elif char == '1':  # 1 -> Pause/Play
+                        paused = not paused
+                        if paused:
+                            audio.pause()
+                        else:
+                            audio.resume()
+                        last_redraw_time = 0
+                        
+                    elif char == '2':  # 2 -> Slower
+                        speed = max(10, speed - 15)
+                        # Restart current chunk at new speed
+                        if not paused and chunk_idx > 0:
+                            chunk_idx -= 1
+                            audio.stop()
+                            delay_remaining = 0.0
+                        last_redraw_time = 0
+                        
+                    elif char == '3':  # 3 -> Faster
+                        speed = min(350, speed + 15)
+                        # Restart current chunk at new speed
+                        if not paused and chunk_idx > 0:
+                            chunk_idx -= 1
+                            audio.stop()
+                            delay_remaining = 0.0
+                        last_redraw_time = 0
+                        
+                    elif char == '4':  # 4 -> Restart dictation
+                        audio.stop()
+                        typed_text = ""
+                        paused = False
+                        chunk_idx = 0
+                        delay_remaining = 0.0
+                        start_time = time.time()
+                        last_redraw_time = 0
+                        
+                    elif char == '5':  # 5 -> Submit & Finish
+                        audio.stop()
+                        break
+                        
+                    elif char == '\x1b':  # Escape sequence (e.g. arrow keys)
+                        # Consume extra characters of arrow key sequence to prevent garbage characters
+                        r2, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        if r2:
+                            sys.stdin.read(2)
+                            
+                    elif char in ('\x7f', '\x08'):  # Backspace
+                        if len(typed_text) > 0:
+                            typed_text = typed_text[:-1]
+                        last_redraw_time = 0
+                        
+                    elif char in ('\r', '\n'):  # Enter
+                        typed_text += "\n"
+                        last_redraw_time = 0
+                        
+                    elif ord(char) >= 32 and ord(char) < 127:  # Printable character
+                        typed_text += char
+                        last_redraw_time = 0
+                        
+    finally:
+        # Make sure speech stops and restore cursor
+        audio.stop()
+        sys.stdout.write("\033[?25h\r\n")
+        sys.stdout.flush()
+        
+    # Render final spelling test report
+    duration_seconds = time.time() - start_time
+    print_report(original_text, typed_text, duration_seconds)
+
+
+if __name__ == "__main__":
+    main()
