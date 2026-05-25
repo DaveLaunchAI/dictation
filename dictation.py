@@ -230,7 +230,7 @@ def generate_gemini(difficulty, topic=None, vocab_words=None):
         vocab_str = f" The passage must be constructed using as many of the following vocabulary words as possible: {', '.join(vocab_words)}."
         
     prompt = (
-        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str}{vocab_str} "
+        f"Generate a passage of text (at least 250 words) for a spelling dictation test.{topic_str}{vocab_str} "
         f"The difficulty level is {difficulty}. "
         f"For Easy: Use common vocabulary, simple spelling words. "
         f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
@@ -270,7 +270,7 @@ def generate_openai(difficulty, topic=None, vocab_words=None):
         vocab_str = f" The passage must be constructed using as many of the following vocabulary words as possible: {', '.join(vocab_words)}."
         
     prompt = (
-        f"Generate a passage of text (at least 100 to 120 words) for a spelling dictation test.{topic_str}{vocab_str} "
+        f"Generate a passage of text (at least 250 words) for a spelling dictation test.{topic_str}{vocab_str} "
         f"The difficulty level is {difficulty}. "
         f"For Easy: Use common vocabulary, simple spelling words. "
         f"For Medium: Include typical spelling bee words and advanced nouns that a well-versed writer should know (e.g., accommodate, conscience, threshold, separate, hierarchy). "
@@ -433,6 +433,18 @@ def find_chunk_for_word(chunks, word_num):
     return len(chunks) - 1  # Fallback to the last chunk if target is out of bounds
 
 
+def find_char_index_for_word(text, word_index):
+    """Finds the character index in text corresponding to the start of the word_index (1-based)."""
+    if word_index <= 1:
+        return 0
+    matches = list(re.finditer(r'\S+', text))
+    if not matches:
+        return 0
+    if word_index - 1 < len(matches):
+        return matches[word_index - 1].start()
+    return len(text)
+
+
 def get_chunk_delay(chunk, target_speed, speak_speed, custom_pause=None):
     """Calculates padding delay to simulate target speed without drawing out words."""
     if custom_pause is not None:
@@ -496,35 +508,88 @@ def draw_screen(typed_text, cursor_pos, paused, target_speed, start_word, total_
     )
     
     console.print(header_panel)
-    console.print("\n[bold white]Type what you hear below (suggestions, auto-correct, case & punctuation ignored):[/bold white]\n")
+    console.print("[bold white]Type what you hear below (suggestions, auto-correct, case & punctuation ignored):[/bold white]")
     
-    # Format typed text with visual cursor.
-    # If the cursor is at the end, append block █. Otherwise, reverse-video style the character under the cursor.
-    if cursor_pos >= len(typed_text):
-        display_text = typed_text + "█"
-    else:
-        display_text = typed_text[:cursor_pos] + f"[reverse]{typed_text[cursor_pos]}[/reverse]" + typed_text[cursor_pos+1:]
-        
     # Get terminal size to perform auto-scaling and avoid scrolling viewport drift
     try:
         cols, rows = os.get_terminal_size()
     except Exception:
         cols, rows = 80, 24
         
-    # Header panel is about 7 lines, instruction 3, newlines/margins 4 -> leave remaining rows
-    max_type_lines = max(5, rows - 14)
+    # We want to leave 1-2 rows margin. Header (5) + instruction (1) + spacing etc. is about 8 rows.
+    max_type_lines = max(3, rows - 10)
     
-    lines = display_text.split("\n")
-    if len(lines) > max_type_lines:
-        display_lines = ["... (scrolled up)"] + lines[-max_type_lines:]
-    else:
-        display_lines = lines
+    # Use a unique character marker for the cursor pos
+    marker = "\uffff"
+    temp_text = typed_text[:cursor_pos] + marker + typed_text[cursor_pos:]
+    
+    wrap_width = max(20, cols - 4)
+    wrapped_lines = []
+    
+    # Wrap text by paragraph and then by width
+    for para in temp_text.split("\n"):
+        if not para:
+            wrapped_lines.append("")
+        else:
+            words = para.split(" ")
+            current_line = []
+            current_len = 0
+            for word in words:
+                word_len = len(word.replace(marker, ""))
+                if not current_line:
+                    current_line.append(word)
+                    current_len = word_len
+                elif current_len + 1 + word_len <= wrap_width:
+                    current_line.append(word)
+                    current_len += 1 + word_len
+                else:
+                    wrapped_lines.append(" ".join(current_line))
+                    current_line = [word]
+                    current_len = word_len
+            if current_line:
+                wrapped_lines.append(" ".join(current_line))
+
+    # Determine visible lines to prevent scrolling and handle viewport tracking
+    if len(wrapped_lines) > max_type_lines:
+        cursor_line_idx = -1
+        for i, line in enumerate(wrapped_lines):
+            if marker in line:
+                cursor_line_idx = i
+                break
         
-    display_text_scaled = "\n".join(display_lines)
-    
-    # Render typed text replacing newlines with \r\n for raw mode TTY compatibility
-    display_text_print = display_text_scaled.replace("\n", "\r\n")
-    console.print(display_text_print, end="")
+        if cursor_line_idx != -1:
+            start_idx = max(0, cursor_line_idx - max_type_lines + 3)
+            end_idx = start_idx + max_type_lines
+            if end_idx > len(wrapped_lines):
+                end_idx = len(wrapped_lines)
+                start_idx = max(0, end_idx - max_type_lines)
+                
+            visible_lines = wrapped_lines[start_idx:end_idx]
+            if start_idx > 0:
+                visible_lines = ["... (scrolled up)"] + visible_lines[1:]
+            if end_idx < len(wrapped_lines):
+                visible_lines = visible_lines[:-1] + ["... (scrolled down)"]
+        else:
+            visible_lines = ["... (scrolled up)"] + wrapped_lines[-max_type_lines+1:]
+    else:
+        visible_lines = wrapped_lines
+
+    # Render each visible line and insert visual cursor
+    display_lines = []
+    for line in visible_lines:
+        if marker in line:
+            idx = line.index(marker)
+            line_clean = line.replace(marker, "")
+            if idx >= len(line_clean):
+                line_formatted = line_clean + "█"
+            else:
+                line_formatted = line_clean[:idx] + f"[reverse]{line_clean[idx]}[/reverse]" + line_clean[idx+1:]
+            display_lines.append(line_formatted)
+        else:
+            display_lines.append(line)
+            
+    display_text_scaled = "\r\n".join(display_lines)
+    console.print(display_text_scaled, end="")
     
     # Clear anything remaining below the cursor
     sys.stdout.write("\033[J")
@@ -730,7 +795,7 @@ def interactive_config_menu():
             words = extract_words_from_pdf(pdf_path)
             console.print(f"[green]Successfully extracted {len(words)} unique words from '{selected_pdf}'.[/green]")
             console.print("\n[bold white]Choose vocabulary range to send to AI:[/bold white]")
-            console.print("  [1] Sample up to 40 random words (Default)")
+            console.print("  [1] Sample up to 100 random words (Default)")
             console.print("  [2] Use ALL unique words from the PDF")
             vocab_choice = input("Enter selection [1-2, default 1]: ").strip()
             
@@ -739,7 +804,7 @@ def interactive_config_menu():
                     console.print(f"[yellow]Warning: Using all {len(words)} words might exceed LLM prompt token limits or yield lower quality coherent text.[/yellow]")
                     confirm_all = input("Are you sure you want to use all words? (y/n) [y]: ").strip().lower()
                     if confirm_all == 'n':
-                        sample_size = min(40, len(words))
+                        sample_size = min(100, len(words))
                         vocab_words = random.sample(words, sample_size)
                         console.print(f"[green]Sampled {sample_size} random words instead.[/green]")
                     else:
@@ -749,7 +814,7 @@ def interactive_config_menu():
                     vocab_words = words
                     console.print(f"[green]Using all {len(vocab_words)} words as vocabulary.[/green]")
             else:
-                sample_size = min(40, len(words))
+                sample_size = min(100, len(words))
                 vocab_words = random.sample(words, sample_size)
                 console.print(f"[green]Sampled {sample_size} random words for vocabulary.[/green]")
                 
@@ -926,7 +991,7 @@ def main():
                 vocab_words = words
                 console.print(f"[green]Using all {len(vocab_words)} words as vocabulary from PDF.[/green]")
             else:
-                sample_size = min(40, len(words))
+                sample_size = min(100, len(words))
                 vocab_words = random.sample(words, sample_size)
                 console.print(f"[green]Sampled {sample_size} random words from PDF vocabulary.[/green]")
             topic = f"PDF vocabulary: {os.path.basename(args.pdf)}"
@@ -1153,6 +1218,7 @@ def main():
                                 target_word = int(word_input)
                                 if 1 <= target_word <= total_words:
                                     chunk_idx = find_chunk_for_word(chunks, target_word)
+                                    cursor_pos = find_char_index_for_word(typed_text, target_word)
                                     delay_remaining = 0.0
                                     paused = False
                                     last_redraw_time = 0
