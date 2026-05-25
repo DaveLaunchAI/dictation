@@ -413,12 +413,193 @@ def cleanup_audio_files(temp_dir):
             pass
 
 
+def is_easy_word(word):
+    """Determines if a word is categorized as 'easy' for pacing and audio pauses."""
+    w = re.sub(r'[^\w]', '', word).lower()
+    if not w:
+        return True
+    if len(w) <= 4:
+        return True
+    
+    # Common easy words list
+    common_easy = {
+        "about", "above", "after", "again", "alone", "along", "also", "among", "angry", "animal", 
+        "another", "answer", "around", "artist", "basket", "beautiful", "before", "behind", "belong", "between", 
+        "bottle", "bright", "broken", "brother", "butter", "camera", "candle", "carried", "caught", "center", 
+        "cherry", "chicken", "children", "chimney", "circle", "clever", "clock", "closed", "cloudy", "coffee", 
+        "collar", "common", "cookie", "corner", "cotton", "country", "cradle", "cream", "cried", "curly", 
+        "danger", "daughter", "decide", "doctor", "dollar", "donkey", "double", "drawer", "dream", "dress", 
+        "drink", "drive", "early", "earth", "eight", "either", "empty", "engine", "enjoy", "enough", 
+        "enter", "event", "every", "except", "expect", "family", "father", "feather", "fellow", "fields", 
+        "finger", "finish", "flower", "flying", "follow", "forest", "forget", "formal", "freeze", "fresh", 
+        "friend", "fright", "frozen", "future", "garden", "gather", "gentle", "gifted", "giving", "gladly", 
+        "golden", "governor", "grand", "grapes", "grassy", "gravel", "ground", "groups", "growth", "guided", 
+        "handle", "happen", "harbor", "hardly", "header", "health", "hearing", "hearts", "heavy", "helper", 
+        "hereby", "heroes", "hidden", "higher", "highly", "history", "holder", "hollow", "honest", "honey", 
+        "honor", "horses", "hourly", "house", "human", "hungry", "hunter", "hurry", "indeed", "inside", 
+        "itself", "jacket", "jersey", "joined", "journey", "joyful", "jungle", "junior", "keeper", "kettle", 
+        "killed", "kindly", "kitchen", "kitten", "knives", "ladder", "ladies", "lantern", "laptop", "larger", 
+        "lately", "latest", "latter", "laugh", "leader", "leaves", "lemon", "length", "lesson", "letter", 
+        "lights", "likely", "listen", "little", "lively", "living", "lizard", "lonely", "lovely", "loving", 
+        "magnet", "making", "manner", "marble", "market", "matter", "meadow", "member", "mental", "mercy", 
+        "middle", "mighty", "miller", "minute", "mirror", "monkey", "months", "mother", "motion", "motive", 
+        "mount", "moving", "murder", "muscle", "music", "myself", "narrow", "nation", "nature", "nearby", 
+        "nearly", "needle", "nephew", "nested", "never", "newly", "nicely", "nickel", "niece", "nights", 
+        "ninety", "nobody", "noises", "normal", "notice", "number", "nylon", "object", "office", "offset", 
+        "opened", "orange", "orders", "others", "ought", "output", "outside", "oxygen", "oyster", "packet", 
+        "palace", "panels", "papers", "parade", "parent", "parlor", "parrot", "passed", "patent", "pathway", 
+        "patrol", "pattern", "pencil", "people", "pepper", "period", "permit", "person", "photos", "piazza", 
+        "pickle", "nicnic", "pieces", "pigeon", "pillow", "pilot", "pirate", "pistol", "places", "planet", 
+        "plants", "player", "please", "plenty", "pocket", "poetry", "poison", "police", "polish", "polite", 
+        "pond", "pony", "poorest", "portal", "poster", "potato", "powder", "praise", "prayer", "prefer", 
+        "pretty", "pride", "priest", "prince", "prison", "prizes", "prompt", "proper", "proudly", "proved", 
+        "proven", "public", "puddle", "pulled", "puppet", "puppy", "purple", "puzzle", "quarry", "queens", 
+        "queer", "quiet", "quiver", "rabbit", "racket", "radish", "railway", "shadow", "shady", "shakily", 
+        "shall", "shame", "shapes", "shared", "sharp", "shaved", "shears", "sheets", "shelf", "shells", 
+        "shield", "shined", "shines", "shiny", "shirts", "shiver", "shocked", "shoes", "shook", "shoots", 
+        "shore", "short", "shots", "should", "shovel", "showed", "shower", "shown", "shows", "shrunk", 
+        "silent", "silver", "simple", "simply", "single", "sister", "sixteen", "sixth", "sixty", "sizing", 
+        "skate", "sketch", "skirt", "skulls", "skyward", "slang", "slated", "sleepy", "sleeve", "slices", 
+        "slide", "slight", "slipped", "slope", "slowly", "small", "smart", "smell", "smiled", "smiley", 
+        "smiles", "smooth", "snails", "snakes", "sneaky", "sounds", "source", "spaces", "spacing", "spades", 
+        "sparks", "speak", "speech", "spells", "spend", "spider", "spills", "spinal", "spoke", "spoken", 
+        "sponge", "sports", "spotted", "spread", "spring", "spunky", "square", "stable", "stacks", "staffs", 
+        "stages", "stains", "stairs", "stakes", "stamps", "stands", "stared", "stares", "starry", "stars", 
+        "starts", "states", "status", "stayed", "stays", "steady", "steam", "steeps", "steer", "stems", 
+        "steps", "sticks", "sticky", "stiff", "still", "single", "stolen", "stones", "stony", "stood", 
+        "stools", "stops", "stored", "stores", "storms", "stormy", "story", "strain", "strand", "straps", 
+        "straw", "stray", "stream", "street", "stress", "stretch", "strict", "strike", "string", "strip", 
+        "stripe", "stroke", "strong", "struck", "studs", "study", "stuff", "stump", "stung", "style", 
+        "styles", "subject", "subtle", "such", "sudden", "suffer", "sugar", "suited", "suits", "summer", 
+        "summit", "summon", "sundae", "sunday", "sunset", "superb", "supper", "surely", "swamps", "swampy", 
+        "swarms", "swear", "sweat", "sweep", "sweet", "swell", "swept", "swift", "swims", "swine", 
+        "swings", "swirl", "switch", "sword", "swore", "sworn", "syrup", "system", "tables", "tablets", 
+        "tackle", "tagged", "tails", "taken", "takes", "talent", "talked", "talker", "talks", "tallest", 
+        "tallow", "tamed", "tangle", "tanks", "target", "tariff", "tasted", "tastes", "tasty", "tattoo", 
+        "taught", "tavern", "taxing", "tea", "teach", "teamed", "teams", "tears", "teased", "teases", 
+        "teeth", "telling", "tells", "temper", "temple", "tenant", "tender", "tenor", "tense", "tented", 
+        "tents", "terms", "tested", "tester", "tests", "thanks", "thanked", "that", "thee", "their", 
+        "them", "theme", "then", "there", "these", "they", "thick", "thief", "thigh", "thimble", 
+        "thin", "thing", "think", "third", "thirst", "thirty", "this", "thorn", "those", "though", 
+        "thread", "threat", "three", "thresh", "threw", "thrice", "thrift", "thrill", "thrive", 
+        "throat", "throne", "throng", "thrown", "throws", "thrum", "thrust", "thumb", "thump", 
+        "thunder", "ticket", "tidal", "tides", "tidy", "tiger", "tight", "tiled", "tiles", 
+        "tills", "timber", "timely", "timers", "times", "timid", "tinder", "tinge", "tingle", 
+        "tinker", "tinkle", "tinsel", "tinted", "tints", "tiny", "tipped", "tipsy", "tiptoe", 
+        "tired", "tires", "tissue", "titans", "title", "toad", "toast", "today", "toffee", 
+        "toiled", "toils", "tokens", "told", "tolls", "tomato", "tomb", "tonal", "toned", 
+        "tones", "tongue", "tonic", "tonight", "tonsil", "took", "tooled", "tools", "tooth", 
+        "topped", "topper", "topic", "topics", "topaz", "torch", "tore", "torn", "torso", 
+        "tossed", "tosses", "totals", "totem", "touch", "tough", "towed", "towel", "tower", 
+        "towns", "toxins", "toyed", "trace", "track", "tract", "trade", "trail", "train", 
+        "trait", "tramps", "trance", "traps", "trash", "travel", "treads", "treat", "treble", 
+        "trees", "tremor", "trench", "trends", "trendy", "tress", "triad", "trial", "tribe", 
+        "trice", "trick", "tried", "tries", "trill", "trims", "trio", "trips", "trite", 
+        "troll", "troop", "trophy", "trots", "trough", "trout", "trowel", "truce", "truck", 
+        "trudge", "true", "truly", "trump", "trunk", "trust", "truth", "tryed", "tubes", 
+        "tubing", "tucked", "tudor", "tufts", "tulip", "tumble", "tumor", "tuner", "tunes", 
+        "tunnel", "turban", "turbot", "turf", "turkey", "turned", "turner", "turns", "turnip", 
+        "tusks", "tutor", "tuxedo", "twain", "twang", "tweak", "tweed", "twelve", "twenty", 
+        "twice", "twigs", "twilight", "twill", "twine", "twin", "twins", "twirl", "twist", 
+        "twitch", "twofold", "tying", "typed", "types", "tyrant", "ulcer", "ultra", "umbel", 
+        "amber", "umpire", "unable", "unbar", "unbend", "unbind", "uncap", "uncle", "uncut", 
+        "under", "undid", "undue", "unfed", "unfit", "unfold", "unfurl", "unhook", "union", 
+        "unison", "unite", "units", "unity", "unjust", "unlace", "unless", "unlike", "unload", 
+        "unlock", "unmade", "unmask", "unpack", "unpin", "unplug", "unreal", "unrest", "unripe", 
+        "unroll", "unsafe", "unsaid", "unseal", "unseen", "unsettle", "unshod", "unsold", 
+        "untie", "until", "unto", "untrue", "unused", "unveil", "unwary", "unwell", "unwind", 
+        "unwise", "unworn", "unwrap", "unyoke", "upbeat", "upcast", "update", "updraft", 
+        "uphill", "uphold", "upland", "uplift", "upon", "uproar", "uproot", "upset", "upshot", 
+        "upside", "upstart", "uptake", "uptown", "upward", "uranium", "urchin", "urgent", 
+        "urging", "urinal", "usable", "usage", "useful", "useless", "usher", "usual", 
+        "usury", "utensil", "utility", "utmost", "utopia", "vacant", "vacuum", "vague", 
+        "valet", "valiant", "valid", "valley", "valued", "values", "valve", "vamps", 
+        "vanish", "vanity", "vapor", "variety", "various", "varnish", "varyed", "varying", 
+        "vases", "vassal", "vaster", "vastly", "vaults", "vector", "veered", "veils", 
+        "veins", "velvet", "vendor", "veneer", "venom", "vented", "vents", "venter", 
+        "venues", "venus", "verbal", "verge", "verify", "verity", "vermin", "vernier", 
+        "verse", "verses", "version", "vertex", "vertical", "very", "vesper", "vessel", 
+        "vested", "vests", "vestry", "vetoed", "vetoes", "vexing", "vials", "vibrant", 
+        "vicar", "viceroys", "victim", "victor", "victory", "video", "videos", "viewed", 
+        "viewer", "views", "vigil", "vigor", "viking", "villas", "villa", "vinyard", 
+        "vintage", "viola", "violet", "violin", "viper", "virgin", "virtual", "virtue", 
+        "virus", "visage", "viscid", "viscosity", "viscount", "visible", "vision", 
+        "visits", "visitor", "visor", "vista", "visual", "vital", "vitriol", "vivid", 
+        "vixen", "vocab", "vocals", "vodka", "vogue", "voiced", "voices", "voided", 
+        "volts", "volume", "vortex", "voted", "voter", "votes", "votive", "vowed", 
+        "vowels", "voyage", "vulcan", "vulgar", "waded", "wader", "wades", "wafer", 
+        "waged", "wager", "wages", "wagon", "wailed", "wails", "waist", "waited", 
+        "waiter", "waits", "waive", "waked", "waken", "wakes", "waking", "walked", 
+        "walker", "walks", "walled", "wallet", "walls", "walnut", "walrus", "wampum", 
+        "wandered", "wands", "waned", "wanes", "waning", "wanted", "wants", "warble", 
+        "warded", "warden", "wards", "warfare", "warily", "warmed", "warmer", "warmly", 
+        "warmth", "warned", "warns", "warped", "warps", "warrant", "warrior", "washed", 
+        "washer", "washes", "wasps", "wasted", "waster", "wastes", "watched", "watcher", 
+        "watches", "water", "waters", "watery", "waved", "waver", "waves", "wavy", 
+        "waxed", "waxen", "waxing", "wayward", "weaken", "weakly", "wealth", "weapon", 
+        "wearer", "wearing", "weary", "weasel", "weather", "weaved", "weaver", "weaves", 
+        "webbed", "wedded", "wedges", "weekly", "weeping", "weeps", "weevil", "weighed", 
+        "weights", "weighty", "weird", "welcome", "welders", "welded", "welding", 
+        "welfare", "wellness", "wells", "welter", "wenches", "went", "wept", "were", 
+        "west", "western", "wetness", "wetted", "whales", "wharf", "whirred", "whistles", 
+        "white", "wholly", "whoop", "whose", "wicked", "wicker", "widely", "widen", 
+        "widow", "width", "wield", "wiggle", "wildly", "wilful", "willow", "wilted", 
+        "wily", "wince", "winced", "winces", "winch", "winded", "windlass", "window", 
+        "winds", "windy", "winged", "winking", "winks", "winner", "winning", "winnow", 
+        "winter", "wintry", "wiped", "wiper", "wipes", "wisdom", "white", "wisely", 
+        "wished", "wishes", "witch", "with", "within", "without", "witness", "witty", 
+        "wives", "wizards", "wobble", "woeful", "wolves", "woman", "women", "wonder", 
+        "wonted", "woods", "wooded", "wooden", "woody", "wooed", "woolens", "wooly", 
+        "worded", "wordy", "worked", "worker", "works", "world", "wormed", "worms", 
+        "worn", "worried", "worries", "worry", "worse", "worship", "worst", "worth", 
+        "worthy", "would", "wound", "woven", "wrack", "wraps", "wrath", "wreaths", 
+        "wrecked", "wrenches", "wrestle", "wretched", "wriggle", "wright", "wring", 
+        "wrist", "write", "writer", "writes", "writing", "written", "wrong", "wrongly", 
+        "wrote", "wrung", "yachts", "yawned", "yawns", "yearbook", "yearly", "years", 
+        "yearn", "yeast", "yelled", "yells", "yellow", "yeoman", "yields", "yoked", 
+        "yokes", "young", "younger", "youth", "youthful", "zealot", "zealous", "zenith", 
+        "zephyr", "zeroes", "zestful", "zigzag", "zipper", "zodiac", "zoning", "zoology"
+    }
+    return w in common_easy
+
+
 def chunk_text(text, chunk_size):
-    """Splits text into chunks of specified word count."""
+    """Splits text into chunks dynamically such that chunks start and end with easy words."""
     words = text.split()
+    if not words:
+        return []
+    
     chunks = []
-    for i in range(0, len(words), chunk_size):
-        chunks.append(" ".join(words[i:i+chunk_size]))
+    i = 0
+    n = len(words)
+    
+    while i < n:
+        if n - i <= chunk_size + 2:
+            chunks.append(" ".join(words[i:]))
+            break
+            
+        ideal_end = i + chunk_size - 1
+        min_j = i + 2
+        max_j = min(n - 2, i + chunk_size + 2)
+        
+        best_j = ideal_end
+        best_score = -1
+        
+        for j in range(min_j, max_j + 1):
+            score = 0
+            if is_easy_word(words[j]):
+                score += 10
+            if is_easy_word(words[j+1]):
+                score += 10
+            score -= abs(j - ideal_end)
+            
+            if score > best_score:
+                best_score = score
+                best_j = j
+                
+        chunks.append(" ".join(words[i:best_j+1]))
+        i = best_j + 1
+        
     return chunks
 
 
@@ -507,9 +688,6 @@ def draw_screen(typed_text, cursor_pos, paused, target_speed, start_word, total_
         expand=True
     )
     
-    console.print(header_panel)
-    console.print("[bold white]Type what you hear below (suggestions, auto-correct, case & punctuation ignored):[/bold white]")
-    
     # Get terminal size to perform auto-scaling and avoid scrolling viewport drift
     try:
         cols, rows = os.get_terminal_size()
@@ -588,8 +766,15 @@ def draw_screen(typed_text, cursor_pos, paused, target_speed, start_word, total_
         else:
             display_lines.append(line)
             
-    display_text_scaled = "\r\n".join(display_lines)
-    console.print(display_text_scaled, end="")
+    # Capture ALL prints to rewrite newlines to \r\n for raw TTY mode
+    with console.capture() as capture:
+        console.print(header_panel)
+        console.print("[bold white]Type what you hear below (suggestions, auto-correct, case & punctuation ignored):[/bold white]")
+        display_text_scaled = "\n".join(display_lines)
+        console.print(display_text_scaled, soft_wrap=True, end="")
+        
+    output_text = capture.get().replace("\r", "").replace("\n", "\r\n")
+    sys.stdout.write(output_text)
     
     # Clear anything remaining below the cursor
     sys.stdout.write("\033[J")
@@ -1145,9 +1330,15 @@ def main():
                     last_redraw_time = now
                     
                 # Read keyboard input without blocking
-                r, _, _ = select.select([sys.stdin], [], [], 0.02)
+                r, _, _ = select.select([fd], [], [], 0.02)
                 if r:
-                    char = sys.stdin.read(1)
+                    try:
+                        char_bytes = os.read(fd, 1)
+                        if not char_bytes:
+                            continue
+                        char = char_bytes.decode('utf-8', errors='ignore')
+                    except Exception:
+                        continue
                     
                     if char == '\x03':  # Ctrl+C -> Cancel
                         audio.stop()
@@ -1234,6 +1425,11 @@ def main():
                             new_settings = termios.tcgetattr(fd)
                             new_settings[2] = new_settings[2] & ~termios.IXON
                             termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
+                            # Flush any leftover input (like arrow keys pressed during prompt) to prevent leakage
+                            try:
+                                termios.tcflush(fd, termios.TCIFLUSH)
+                            except Exception:
+                                pass
                             
                             # Hide cursor again
                             sys.stdout.write("\033[?25l")
@@ -1244,22 +1440,30 @@ def main():
                             last_loop_time = time.time()  # Reset loop time to prevent pacing jumps
                         
                     elif char == '\x1b':  # Escape sequence (e.g. arrow keys)
-                        r2, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        r2, _, _ = select.select([fd], [], [], 0.05)
                         if r2:
-                            seq = sys.stdin.read(2)
-                            if seq == '[D':  # Left Arrow -> move cursor left
-                                cursor_pos = max(0, cursor_pos - 1)
-                                last_redraw_time = 0
-                            elif seq == '[C':  # Right Arrow -> move cursor right
-                                cursor_pos = min(len(typed_text), cursor_pos + 1)
-                                last_redraw_time = 0
-                            elif seq == '[3':  # Delete key sequence (\x1b[3~)
-                                r3, _, _ = select.select([sys.stdin], [], [], 0.02)
-                                if r3:
-                                    sys.stdin.read(1)  # Consume '~'
-                                    if cursor_pos < len(typed_text):
-                                        typed_text = typed_text[:cursor_pos] + typed_text[cursor_pos+1:]
-                                        last_redraw_time = 0
+                            try:
+                                char2 = os.read(fd, 1).decode('utf-8', errors='ignore')
+                                if char2 == '[':
+                                    r3, _, _ = select.select([fd], [], [], 0.05)
+                                    if r3:
+                                        char3 = os.read(fd, 1).decode('utf-8', errors='ignore')
+                                        if char3 == 'D':  # Left Arrow -> move cursor left
+                                            cursor_pos = max(0, cursor_pos - 1)
+                                            last_redraw_time = 0
+                                        elif char3 == 'C':  # Right Arrow -> move cursor right
+                                            cursor_pos = min(len(typed_text), cursor_pos + 1)
+                                            last_redraw_time = 0
+                                        elif char3 == '3':  # Delete key sequence (\x1b[3~)
+                                            r4, _, _ = select.select([fd], [], [], 0.05)
+                                            if r4:
+                                                char4 = os.read(fd, 1).decode('utf-8', errors='ignore')
+                                                if char4 == '~':
+                                                    if cursor_pos < len(typed_text):
+                                                        typed_text = typed_text[:cursor_pos] + typed_text[cursor_pos+1:]
+                                                        last_redraw_time = 0
+                            except Exception:
+                                pass
                             
                     elif char in ('\x7f', '\x08'):  # Backspace
                         # Delete character before the cursor
